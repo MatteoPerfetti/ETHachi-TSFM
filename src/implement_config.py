@@ -18,11 +18,10 @@ class SourceConfig:
 
 @dataclass(frozen=True)
 class Config:
-    data_dir: Path 
     sources: list[SourceConfig]
     start: pd.Timestamp
     end: pd.Timestamp
-    resolution: str
+    resolutioncode: str
 
     def __post_init__(self):
         if not self.sources:
@@ -30,9 +29,9 @@ class Config:
         if self.start >= self.end:
             raise ValueError(f"START ({self.start}) must be before END ({self.end})")
         try:
-            pd.Timedelta(self.resolution)
+            pd.Timedelta(self.resolutioncode)
         except ValueError:
-            raise ValueError(f"RESOLUTION '{self.resolution}' is not an ISO 8601 duration like 'PT15M'") from None
+            raise ValueError(f"RESOLUTIONCODE '{self.resolutioncode}' is not an ISO 8601 duration like 'PT15M'") from None
 
 
 def _build_source(name: str, raw: dict) -> SourceConfig:
@@ -46,9 +45,8 @@ def _build_source(name: str, raw: dict) -> SourceConfig:
 
 def build_config() -> Config:
     return Config(
-        data_dir=config.DATA_DIR,
         sources=[_build_source(name, raw) for name, raw in config.SOURCES.items()],
         start=pd.Timestamp(config.START, tz="UTC"),
         end=pd.Timestamp(config.END, tz="UTC"),
-        resolution=config.RESOLUTION,
+        resolutioncode=config.RESOLUTIONCODE,
     )

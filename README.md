@@ -7,15 +7,18 @@ The goal is to forecast the Wind and PV generation in MW for the Belgian Power G
 ## Datasources
 ### PV and Wind generation
 Historical generation of PV and Wind in MW for the years 2024, 2025 and Januar 2026 using the API by Elia (Link: https://opendata.elia.be/api-console/explore/v2.1/)
-- dataset: ods201
-#### Query
-"datetime":"2025-06-24T16:00:00+00:00",
-"resolutioncode":"PT15M",
-"fueltypeentsoe":"Wind Onshore", (or "Wind Offshore", "Solar")
-"fueltypepublication":"Wind Onshore", (or "Wind Offshore", "Solar")
-"generatedpower":1113.74
-
-
+- wind: ods031
+Relevant parameters
+    "datetime":"2021-01-15T18:15:00+00:00",
+    "resolutioncode":"PT15M",
+    "region":"Flanders","Wallonia","Federal"
+    "measured":2.82,
+- solar: ods032
+Relevant parameters
+    "datetime":"2025-07-10T14:00:00+00:00",
+    "resolutioncode":"PT15M",
+    "region":"Belgium",
+    "measured":5092.607,
 ### Temporal dummy variables
 - Temporal dummy variables on month (i.e. season), weekday, national holiday (Link: https://pypi.org/project/holidays/)
 ### Weather covariates (optional)
@@ -42,7 +45,12 @@ Historical generation of PV and Wind in MW for the years 2024, 2025 and Januar 2
 ### Requirements
 
 ## Later steps (not part of current scope)
-### Increase spatial resolution
+### Other covariates
+- Planned and forced unavailabilities of technical units
+### Adopt the Previous Model Runs API or the Single Runs API (model specific) by openmeteo
+- For Previous Model Runs use the _previous_day2 values 
+- For Single Runs API choose the proper models
+### Increase spatial resolution PV
 - Production of PV by Belgian region
 ### Other forecasting TSO regions
 - Expand forecast to North-East Germany, specifically the 50Hertz (daugther company of elia group) TSO region. 

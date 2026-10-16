@@ -13,7 +13,7 @@ def load_sources(cfg: Config) -> dict[str, pd.DataFrame]:
     for src_cfg in cfg.sources:
         with HttpClient(src_cfg.base_url) as client:
             source = create_source(src_cfg, client)
-            frames[src_cfg.name] = source.load(cfg.start, cfg.end, cfg.resolution)
+            frames[src_cfg.name] = source.load(cfg.start, cfg.end, cfg.resolutioncode)
     return frames
 
 
