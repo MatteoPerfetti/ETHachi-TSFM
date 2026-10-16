@@ -4,6 +4,8 @@ Repository TSFM for Hitachi Energy (Energy Now! 5.0 Challenge): Benchmarking Tim
 ## Forecast
 The goal is to forecast the Wind and PV generation in MW for the Belgian Power Grid in 15min resolution. The initial timehorizon is to predict generation from 09:00 to midnight and throughout the following day. This is sums up to 39 hours or 166 15min-timesteps.
 
+## How to run
+
 ## Datasources
 ### PV and Wind generation
 Historical generation of PV and Wind in MW for the years 2024, 2025 and Januar 2026 using the API by Elia (Link: https://opendata.elia.be/api-console/explore/v2.1/)
@@ -22,14 +24,16 @@ Relevant parameters
 ### Temporal dummy variables
 - Temporal dummy variables on month (i.e. season), weekday, national holiday (Link: https://pypi.org/project/holidays/)
 ### Weather covariates (optional)
-- Column names follow <variable>_<height>_<stat>[_<provider>]. 
-
+- DWD parquet file for wind covariates (already in PT15M). 
     Variables: temperature_2m (°C), relative_humidity_2m (%), pressure_msl / surface_pressure (hPa), wind_speed_<h>m (km/h), wind_direction_<h>m (°), wind_gusts_10m (km/h) 
 
-    Available wind heights depend on the provider (10, 50, 80, 100, 120, 150, 180, 200 m). DWD, for example, has 10/80/120/180 m. 
+    Available wind heights 10/80/120/180 m. THe parquet file includes both mean as well as standard deviation values for all 
+- Open meteo data for solar covariates (hourly, needs to be interpolated)
+    Variables: ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "direct_radiation", "diffuse_radiation", "direct_normal_irradiance"]
+
 ## Data splits
-### Train/feed 2024, Test 2025
-### Train feed 2024 & 2025, Test Jan 2026
+### Train/feed 2024, Test 2025 (implemented)
+### Train feed 2024 & 2025, Test Jan 2026 (not yet implemented)
 
 ## ML pipeline
 1. Config datasources and models
@@ -40,19 +44,45 @@ Relevant parameters
 6. Generate forecast (potential hyperparameter tuning)
 7. Test forecast on ground truth test period
 8. Compare and reason results
-## Code base architecture
-[to be added]
+
+## How-to-run
 ### Requirements
+- Python >= 3.14
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- DWD weather file at `data/dwd/gen_weather_dwd.parquet` currently not in gitignore to pass it over (temporary)
+
+### Setup
+```bash
+git clone <repo-url>
+cd ETHachi-TSFM
+uv sync                        # creates .venv and installs locked dependencies
+```
+Activate the environment:
+```bash
+.venv\Scripts\activate         # Windows
+source .venv/bin/activate      # Linux/macOS
+```
+Without uv: `python -m venv .venv`, activate it, then `pip install holidays ipykernel matplotlib pandas pyarrow pytest requests scikit-learn xgboost`
+
+### Run
+1. Adjust `config.py` (target, model, date ranges).
+2. Run the pipeline:
+```bash
+python main.py
+```
+Elia and Open-Meteo data are downloaded on first run and cached in `data/`. Forecast plots are saved to `plots/`.
 
 ## Later steps (not part of current scope)
+### Switch to direct forecasting
+- Instead of recursive iterated models (fast and leightweight), choose direct forecasting (one model per predicted timestep)
 ### Other covariates
 - Planned and forced unavailabilities of technical units
-### Adopt the Previous Model Runs API or the Single Runs API (model specific) by openmeteo
+#### Adopt the Previous Model Runs API or the Single Runs API (model specific) by openmeteo
 - For Previous Model Runs use the _previous_day2 values 
 - For Single Runs API choose the proper models
-### Stochastic features
+#### Stochastic features
 - include stochastic featues (now only deterministic - mean)
-### Increase spatial resolution PV
+#### Increase spatial resolution PV
 - Production of PV by Belgian region
 ### Other forecasting TSO regions
 - Expand forecast to North-East Germany, specifically the 50Hertz (daugther company of elia group) TSO region. 

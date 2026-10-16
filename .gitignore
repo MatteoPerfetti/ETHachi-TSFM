@@ -3,3 +3,5 @@ claude/
 # data/   -- for now use parquet files 
 data/solar/
 data/wind/
+data/weather/
+plots/

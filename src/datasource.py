@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from .http_client import HttpClient
-from ..config import DATA_DIR
-from ..logger import logger
+from config import DATA_DIR
+from logger import logger
+from src.http_client import HttpClient
 
 def to_wide(df: pd.DataFrame, index: str, columns: str, values: str) -> pd.DataFrame:
     """Pivot long to wide, summing rows that share the same index and column (e.g. several units per region)."""
@@ -27,8 +27,6 @@ def fetch_elia(client: HttpClient, regions: list[str], start: str, end: str, res
 
     start and end are UTC ISO 8601 strings, e.g. "2024-01-01T00:00:00Z".
     """
-    if pd.Timestamp(start) >= pd.Timestamp(end):
-        raise ValueError(f"start ({start}) must be before end ({end})")
     region = ", ".join(f'"{r}"' for r in regions)
     where = (
         f"datetime >= date'{start}'"
@@ -69,8 +67,6 @@ def fetch_openmeteo(client: HttpClient, latitude: float, longitude: float, varia
     start and end are UTC ISO 8601 strings. Open-Meteo only takes dates and its end_date is inclusive,
     so the whole day of `end` is downloaded.
     """
-    if pd.Timestamp(start) >= pd.Timestamp(end):
-        raise ValueError(f"start ({start}) must be before end ({end})")
     resp = client.get_json(params={
         "latitude": latitude,
         "longitude": longitude,

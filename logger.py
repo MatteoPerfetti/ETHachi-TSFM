@@ -1,6 +1,6 @@
 import logging
 
-from . import config
+import config
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(module)s | %(message)s"
 
