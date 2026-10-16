@@ -12,13 +12,13 @@ Relevant parameters
     "datetime":"2021-01-15T18:15:00+00:00",
     "resolutioncode":"PT15M",
     "region":"Flanders","Wallonia","Federal"
-    "measured":2.82,
+    "measured": [generated Power in MW],
 - solar: ods032
 Relevant parameters
     "datetime":"2025-07-10T14:00:00+00:00",
     "resolutioncode":"PT15M",
     "region":"Belgium",
-    "measured":5092.607,
+    "measured": [generated Power in MW],
 ### Temporal dummy variables
 - Temporal dummy variables on month (i.e. season), weekday, national holiday (Link: https://pypi.org/project/holidays/)
 ### Weather covariates (optional)
@@ -50,6 +50,8 @@ Relevant parameters
 ### Adopt the Previous Model Runs API or the Single Runs API (model specific) by openmeteo
 - For Previous Model Runs use the _previous_day2 values 
 - For Single Runs API choose the proper models
+### Stochastic features
+- include stochastic featues (now only deterministic - mean)
 ### Increase spatial resolution PV
 - Production of PV by Belgian region
 ### Other forecasting TSO regions
