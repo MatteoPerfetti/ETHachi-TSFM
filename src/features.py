@@ -1,0 +1,97 @@
+import holidays
+import numpy as np
+import pandas as pd
+from logger import logger
+
+
+def interpolate_to_15min(df: pd.DataFrame) -> pd.DataFrame:
+    """Upsample a frame with a DatetimeIndex (e.g. hourly) to 15min steps by time-based linear interpolation."""
+    return df.resample("15min").interpolate(method="time")
+
+
+def merge(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Merge frames on their shared DatetimeIndex, prefixing columns with the dict key.
+
+    Rows where any frame has no value are dropped, with a WARNING.
+    """
+    merged = pd.concat([df.add_prefix(f"{name}_") for name, df in dfs.items()], axis=1, join="outer").sort_index()
+    complete = merged.dropna()
+    dropped = len(merged) - len(complete)
+    if dropped:
+        missing = merged.isna().sum()
+        logger.warning("Dropped %d of %d rows with missing values. Missing per column: %s",
+                       dropped, len(merged), missing[missing > 0].to_dict())
+    return complete
+
+# ------
+# Temporary workaround to merge dwd parquet file with weather
+
+def merge_dwd_weather(df: pd.DataFrame, dwd_path: str) -> pd.DataFrame:
+    """Merge the DWD weather data with the Open-Meteo weather data."""
+    # Interpolate the Open-Meteo data to 15min steps, then merge with the DWD data on timestamp
+    df = interpolate_to_15min(df)
+    # Drop 'measured' column from dwd_df
+    dwd_df = pd.read_parquet(dwd_path).set_index("timestamp").drop(columns="measured", errors="ignore")
+    logger.info("Loaded DWD weather data from %s (%d rows)", dwd_path, len(dwd_df))
+    # Merge DWD data (PM15M) with Open-Meteo data (PT1H) on timestamp, keeping only rows where both have values
+    merged = df.join(dwd_df, how="outer").sort_index()
+    complete = merged.dropna()
+    dropped = len(merged) - len(complete)
+    if dropped:
+        missing = merged.isna().sum()
+        logger.warning("Dropped %d of %d rows with missing value due to alignment. Missing per column: %s",
+                        dropped, len(merged), missing[missing > 0].to_dict())
+    return complete
+
+# ------
+
+# ====================================================
+# ------------- Add lag & calendar features -----------
+def add_lag_features(df: pd.DataFrame, context_length: int, prediction_length: int = 1,
+                     columns: list[str] | None = None) -> pd.DataFrame:
+    """Return only the columns <col>_lag_<k> for k = prediction_length..prediction_length + context_length - 1
+    (shifted by k steps) for the given columns (None = all).
+
+    Starting at lag prediction_length means every row only uses values known prediction_length steps earlier,
+    so each row is an honest forecast for any horizon up to prediction_length.
+    The first prediction_length + context_length - 1 rows have no complete lag history and are dropped.
+    """
+    columns = list(df.columns) if columns is None else columns
+    max_lag = prediction_length + context_length - 1
+    lags = [df[columns].shift(k).add_suffix(f"_lag_{k}") for k in range(prediction_length, max_lag + 1)]
+    return pd.concat(lags, axis=1).iloc[max_lag:]
+
+
+
+def add_calendar_features(df: pd.DataFrame, timezone: str, country: str) -> pd.DataFrame:
+    """Add dummy columns month_<1..12>, weekday_<0..6> (0 = Monday) and is_holiday (national holidays of `country`).
+
+    Calendar values are taken in local `timezone`; a naive index is assumed to be UTC. All months and weekdays get
+    a column even if absent from the data, so train and test frames have the same columns.
+    """
+    index = df.index.tz_localize("UTC") if df.index.tz is None else df.index
+    local = index.tz_convert(timezone)
+    month = pd.Categorical(local.month, categories=range(1, 13))
+    weekday = pd.Categorical(local.weekday, categories=range(7))
+    calendar = pd.concat([pd.get_dummies(month, prefix="month", dtype=int),
+                          pd.get_dummies(weekday, prefix="weekday", dtype=int)], axis=1)
+    national_holidays = holidays.country_holidays(country, years=local.year.unique().tolist())
+    calendar["is_holiday"] = pd.Index(local.date).isin(list(national_holidays)).astype(int)
+    calendar.index = df.index
+    return pd.concat([df, calendar], axis=1)
+
+
+def encode_directions(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace every column containing "direction" (in degrees) with <col>_sin and <col>_cos, at the same position."""
+    encoded = {}
+    for col in df.columns:
+        if "direction" in col:
+            radians = np.deg2rad(df[col])
+            encoded[col.replace("direction", "sin")] = np.sin(radians)
+            encoded[col.replace("direction", "cos")] = np.cos(radians)
+        else:
+            encoded[col] = df[col]
+    return pd.DataFrame(encoded, index=df.index)
+
+
+
