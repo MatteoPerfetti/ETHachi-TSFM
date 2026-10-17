@@ -5,7 +5,13 @@ from logger import logger
 
 
 def interpolate_to_15min(df: pd.DataFrame) -> pd.DataFrame:
-    """Upsample a frame with a DatetimeIndex (e.g. hourly) to 15min steps by time-based linear interpolation."""
+    # if 'timestamp' shows up as a column, we convert it in DatatimeIndex
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.set_index("timestamp")
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
     return df.resample("15min").interpolate(method="time")
 
 
