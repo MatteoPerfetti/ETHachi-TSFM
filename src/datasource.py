@@ -77,7 +77,7 @@ def fetch_openmeteo(client: HttpClient, latitude: float, longitude: float, varia
     })
     df = pd.DataFrame(resp["hourly"]).rename(columns={"time": "datetime"})
     df["timestamp"] = pd.to_datetime(df["datetime"], utc=True)
-    return df.set_index("datetime")
+    return df.set_index("timestamp").drop(columns="datetime")
 
 
 def load_openmeteo(name: str, client: HttpClient, latitude: float, longitude: float, variables: list[str],
@@ -86,7 +86,9 @@ def load_openmeteo(name: str, client: HttpClient, latitude: float, longitude: fl
     path = cache_path(name, start, end, "PT1H")
     if path.exists():
         logger.info("Loaded %s from cache %s", name, path)
-        return pd.read_parquet(path)
+        df = pd.read_parquet(path).drop(columns=["datetime", "timestamp"], errors="ignore")
+        df.index = pd.to_datetime(df.index, utc=True)
+        return df
     logger.info("Fetching %s from the Open-Meteo API", name)
     df = fetch_openmeteo(client, latitude, longitude, variables, start, end)
     path.parent.mkdir(parents=True, exist_ok=True)

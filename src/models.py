@@ -51,21 +51,21 @@ def cross_validation_splits(df: pd.DataFrame, n_splits: int, test_size: str | pd
 
 # ==========================================
 # ------------- Run model ------------------
-def translate_model(modelname: str):
+def translate_model(modelname: str, model_params: dict | None = None):
     """Translate a model name string to the corresponding sklearn-compatible regressor class."""
     if modelname == "xgboost":
         from xgboost import XGBRegressor
-        return XGBRegressor()
+        return XGBRegressor(**(model_params or {}))
     else:
         raise ValueError(f"Unknown model name: {modelname}")
 
 def run_model(modelname: str, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.DataFrame,
-              y_test: pd.DataFrame) -> tuple[float, pd.Series]:
+              y_test: pd.DataFrame, model_params: dict | None = None) -> tuple[float, pd.Series]:
     """Fit any sklearn-compatible regressor (e.g. xgboost.XGBRegressor) on train, predict test, return the RMSE.
 
     For several target columns the RMSE is averaged uniformly over them.
     """
-    model = translate_model(modelname)  
+    model = translate_model(modelname, model_params)  
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     rmse = root_mean_squared_error(y_test, y_pred)

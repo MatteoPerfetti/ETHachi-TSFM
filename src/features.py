@@ -32,6 +32,7 @@ def merge_dwd_weather(df: pd.DataFrame, dwd_path: str) -> pd.DataFrame:
     df = interpolate_to_15min(df)
     # Drop 'measured' column from dwd_df
     dwd_df = pd.read_parquet(dwd_path).set_index("timestamp").drop(columns="measured", errors="ignore")
+    dwd_df.index = pd.to_datetime(dwd_df.index, utc=True).astype(df.index.dtype)
     logger.info("Loaded DWD weather data from %s (%d rows)", dwd_path, len(dwd_df))
     # Merge DWD data (PM15M) with Open-Meteo data (PT1H) on timestamp, keeping only rows where both have values
     merged = df.join(dwd_df, how="outer").sort_index()
@@ -92,6 +93,5 @@ def encode_directions(df: pd.DataFrame) -> pd.DataFrame:
         else:
             encoded[col] = df[col]
     return pd.DataFrame(encoded, index=df.index)
-
 
 

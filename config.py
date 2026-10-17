@@ -12,6 +12,17 @@ TRADITIONAL_MODELS = ["xgboost"]
 TSFM_MODELS = ["citras_fm"]
 MODEL_TYPE = "xgboost"              # "xgboost"
 # ==========================================
+# ------------- XGBoost config ----
+# ==========================================
+
+UNTUNED = False  # True: use default hyperparameters, False: tune hyperparameters
+MAX_DEPTH = [1, 3, 5, 7, 9]                # maximum depth of the trees
+N_ESTIMATORS = [50, 100, 200, 300, 400]       # number of trees
+LEARNING_RATE = [0.01, 0.1, 0.2, 0.3]      # learning rate for boosting
+OPTUNA = True  # True: use Optuna for hyperparameter tuning, False: use grid search
+OPTUNA_N_TRIALS = 100  # number of trials for Optuna hyperparameter tuning
+
+# ==========================================
 # ------------- Forecast config ----
 # ==========================================
 TARGET_SOURCE = "wind"              # name of the target source
@@ -30,8 +41,8 @@ USE_CROSS_VALIDATION = False            # True: cross-validation, False: train/t
 
 TRAIN_START = "2024-01-04T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
 TRAIN_END = "2024-01-24T23:45:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
-TEST_START = "2024-01-25T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-TEST_END = "2024-01-31T23:45:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
+TEST_START = "2025-01-25T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
+TEST_END = "2025-01-31T23:45:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
 
 # Cross validation (time-based, durations are pandas timedelta strings, e.g. "6h", "2D")
 CV_N_SPLITS = 5
@@ -42,7 +53,7 @@ CV_MAX_TRAIN_SIZE = None           # max length of the train window, None = expa
 # ------------- Data Source config ---------
 # ==========================================
 DATA_START = "2024-01-01T00:00:00Z"     # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-DATA_END = "2024-01-31T23:45:00Z"       # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
+DATA_END = "2025-01-31T23:45:00Z"       # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
 
 
 # data folder

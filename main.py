@@ -10,6 +10,7 @@ from src.models import split_train_test, cross_validation_splits, run_model
 from src.plotter import plot_forecast
 from src.validate_config import validate_config
 
+from src.tuning import evaluate_baseline_cv, tune_optuna, tune_xgboost
 
 def load_sources() -> dict[str, pd.DataFrame]:
     """Load every configured Elia and Open-Meteo source: from data/ if cached, otherwise from the API."""
@@ -41,6 +42,7 @@ def load_features(features_data: dict[str, pd.DataFrame], target: pd.DataFrame) 
     features = encode_directions(features)
     # Add lags and calendar features to the merged data
     lag_features = add_lag_features(target, config.CONTEXT_LENGTH, config.PREDICTION_LENGTH)
+    features.index = features.index.astype(target.index.dtype)
     features = features.join(lag_features, how="inner")
     features = add_calendar_features(features, config.TIMEZONE, config.COUNTRY)
 
@@ -92,14 +94,30 @@ def run() -> None:
 
     print(features.head())
     print(target.head())
+
     # 3. Run models
     X_train, X_test, y_train, y_test = split(features, target)
-    rmse, y_pred = run_model(config.MODEL_TYPE, X_train, X_test, y_train, y_test)
+
+    if config.OPTUNA:
+        model_params, cv_rmse = tune_optuna(X_train, y_train, config.OPTUNA_N_TRIALS)
+        logger.info("Optuna validation RMSE: %.2f MW", cv_rmse)
+    elif config.UNTUNED:
+        cv_rmse, fold_rmses = evaluate_baseline_cv(X_train, y_train)
+        logger.info("Baseline validation RMSE: %.2f MW", cv_rmse)
+        model_params = None
+    else:
+        model_params, fold_rmses = tune_xgboost(
+            X_train, y_train, config.MAX_DEPTH, config.N_ESTIMATORS, config.LEARNING_RATE
+        )
+    rmse, y_pred = run_model(
+        config.MODEL_TYPE, X_train, X_test, y_train, y_test,
+        model_params=model_params,
+    )
+
     logger.info("Test RMSE: %.2f MW", rmse)
 
     # 4. Plot the forecast & save it to a file
     plot_forecast(y_test, y_pred, rmse, config.PLOT_DIRECTORY / f"forecast_{config.TARGET_SOURCE}_{config.MODEL_TYPE}.png")
-
 
 if __name__ == "__main__":
     run()
