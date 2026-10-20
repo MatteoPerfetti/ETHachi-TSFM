@@ -5,6 +5,9 @@ what was done so far:
 - succesfully implemented zero shot for wind_MW over the first 39 time steps of 2026 (39*15 minutes) with context = target variable in 2024
 
 next steps:
+
+sticking to the official repo tutorial: https://github.com/amazon-science/chronos-forecasting/blob/main/notebooks/chronos-2-quickstart.ipynb
+
 - insert covariates (future values of weather) in the context input
 - implementing the rolling window algorithm (for now, we are only predicting a few hours; we want a loop that increases the context and predicts the whole 2025 one iteration at a time)
 - implementing a metrics_evaluation script/function that computes our two metrics confronting the prediction with the true value
