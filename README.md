@@ -90,6 +90,7 @@ Elia and Open-Meteo data are downloaded on first run and cached in `data/`. Fore
 ### Chronos-2 implementation
 
 what was done so far:
+- install on the terminal two libraries using: pip install chronos-forecasting torch
 - downloaded and used the library to have the model weights
 - succesfully implemented zero shot for wind_MW over the first 39 time steps of 2026 (39*15 minutes) with context = target variable in 2024
 
