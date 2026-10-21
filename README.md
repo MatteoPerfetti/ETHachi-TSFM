@@ -109,10 +109,16 @@ notes:
 ### Base Thinking for an Infrastructure
 
 ├── config.py             <- Intervalli di contesto (192, 672, 1344, 2880 step) e lista modelli
+
 ├── data/                 <- Cache locale in formato .parquet (Elia, DWD, Open-Meteo)
+
 ├── src/
 │   ├── data_loader.py    <- Estrazione e normalizzazione dati
+
 │   ├── models_wrapper.py <- Classe unificata per eseguire i singoli TSFM
+
 │   └── metrics.py        <- Calcolo di RMSE, MAE, WAPE
+
 ├── main.py               <- Pipeline eseguibile da terminale / motore di calcolo
+
 └── app.py                <- Interfaccia Streamlit con selettori e grafici Plotly
