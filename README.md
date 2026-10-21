@@ -105,3 +105,14 @@ sticking to the official repo tutorial: https://github.com/amazon-science/chrono
 notes:
 - context_df starts in DATA_START and finishes in DATA_END (TRAIN/TEST_START/END are not relevant for this zero shot approach as we don't do train --> test but only give context and get the prediction)
 - pred_df starts in DATA_END and finishes in DATA_END + PREDICTION_LENGHT
+
+### Base Thinking for an Infrastructure
+
+├── config.py             <- Intervalli di contesto (192, 672, 1344, 2880 step) e lista modelli
+├── data/                 <- Cache locale in formato .parquet (Elia, DWD, Open-Meteo)
+├── src/
+│   ├── data_loader.py    <- Estrazione e normalizzazione dati
+│   ├── models_wrapper.py <- Classe unificata per eseguire i singoli TSFM
+│   └── metrics.py        <- Calcolo di RMSE, MAE, WAPE
+├── main.py               <- Pipeline eseguibile da terminale / motore di calcolo
+└── app.py                <- Interfaccia Streamlit con selettori e grafici Plotly
