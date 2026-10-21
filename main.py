@@ -1,6 +1,4 @@
 import pandas as pd
-from xgboost import XGBRegressor
-
 import config
 from logger import logger
 from src.datasource import load_elia, load_openmeteo
@@ -9,6 +7,10 @@ from src.http_client import HttpClient
 from src.models import split_train_test, cross_validation_splits, run_model
 from src.plotter import plot_forecast
 from src.validate_config import validate_config
+
+import torch
+from chronos import BaseChronosPipeline
+import numpy as np
 
 
 def load_sources() -> dict[str, pd.DataFrame]:
@@ -90,16 +92,37 @@ def run() -> None:
     # Keep only target rows that have a complete feature row (lags, merges may drop rows)
     target = target.loc[features.index]
 
-    print(features.head())
-    print(target.head())
-    # 3. Run models
+    ######################################################
+    context_df = target.reset_index()
+    context_df.columns = ["timestamp", "target"]
+    context_df["item_id"] = "wind_belgium"
+    context_df = context_df[["item_id", "timestamp", "target"]]
+
+    context_df["timestamp"] = pd.to_datetime(context_df["timestamp"])
+    context_df["timestamp"] = context_df["timestamp"].dt.tz_localize(None)
+
+    pipeline = BaseChronosPipeline.from_pretrained(
+        "amazon/chronos-2",
+        device_map="cpu",
+    )
+
+    pred_df = pipeline.predict_df(
+        context_df,
+        prediction_length=39,
+        quantile_levels = [0.1, 0.5, 0.9]
+    )
+
+    print(pred_df.shape)
+    print(pred_df.head())
+    print(pred_df.tail())
+    '''
     X_train, X_test, y_train, y_test = split(features, target)
     rmse, y_pred = run_model(config.MODEL_TYPE, X_train, X_test, y_train, y_test)
     logger.info("Test RMSE: %.2f MW", rmse)
 
     # 4. Plot the forecast & save it to a file
     plot_forecast(y_test, y_pred, rmse, config.PLOT_DIRECTORY / f"forecast_{config.TARGET_SOURCE}_{config.MODEL_TYPE}.png")
-
+    '''
 
 if __name__ == "__main__":
     run()
