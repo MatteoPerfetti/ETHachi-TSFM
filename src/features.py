@@ -37,7 +37,9 @@ def merge_dwd_weather(df: pd.DataFrame, dwd_path: str) -> pd.DataFrame:
     # Interpolate the Open-Meteo data to 15min steps, then merge with the DWD data on timestamp
     df = interpolate_to_15min(df)
     # Drop 'measured' column from dwd_df
-    dwd_df = pd.read_parquet(dwd_path).set_index("timestamp").drop(columns="measured", errors="ignore")
+    dwd_df = pd.read_parquet(dwd_path)
+    dwd_df["timestamp"] = pd.to_datetime(dwd_df["timestamp"], utc=True)
+    dwd_df = dwd_df.set_index("timestamp").drop(columns="measured", errors="ignore")
     logger.info("Loaded DWD weather data from %s (%d rows)", dwd_path, len(dwd_df))
     # Merge DWD data (PM15M) with Open-Meteo data (PT1H) on timestamp, keeping only rows where both have values
     merged = df.join(dwd_df, how="outer").sort_index()
@@ -75,7 +77,7 @@ def add_calendar_features(df: pd.DataFrame, timezone: str, country: str) -> pd.D
     Calendar values are taken in local `timezone`; a naive index is assumed to be UTC. All months and weekdays get
     a column even if absent from the data, so train and test frames have the same columns.
     """
-    index = df.index.tz_localize("UTC") if df.index.tz is None else df.index
+    index = pd.DatetimeIndex(pd.to_datetime(df.index, utc=True))
     local = index.tz_convert(timezone)
     month = pd.Categorical(local.month, categories=range(1, 13))
     weekday = pd.Categorical(local.weekday, categories=range(7))
@@ -98,6 +100,5 @@ def encode_directions(df: pd.DataFrame) -> pd.DataFrame:
         else:
             encoded[col] = df[col]
     return pd.DataFrame(encoded, index=df.index)
-
 
 
