@@ -147,13 +147,63 @@ notes:
 - input format: expects a 1D NumPy array `(timesteps,)` with `dtype=np.float32` for single-series forecasting
 - output format: `ForecastOutput` object with `.forecast` (median) and `.quantiles` matrix of shape `(horizon, 9)` corresponding to levels `[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]`
 
-### Base Thinking for an Infrastructure
+## Test Infrastructure & Architecture
 
-├── config.py             <- Intervalli di contesto (192, 672, 1344, 2880 step) e lista modelli
-├── data/                 <- Cache locale in formato .parquet (Elia, DWD, Open-Meteo)
-├── src/
-│   ├── data_loader.py    <- Estrazione e normalizzazione dati
-│   ├── models_wrapper.py <- Classe unificata per eseguire i singoli TSFM
-│   └── metrics.py        <- Calcolo di RMSE, MAE, WAPE
-├── main.py               <- Pipeline eseguibile da terminale / motore di calcolo
-└── app.py                <- Interfaccia Streamlit con selettori e grafici Plotly
+The testing and benchmarking framework is structured as a modular pipeline designed to evaluate traditional baselines (e.g. XGBoost) alongside Time Series Foundation Models (Chronos-2, Timestral, TimesFM 3.0) on the Elia renewable forecasting benchmark.
+
+### Directory Structure
+
+```text
+ETHachi-TSFM/
+├── config.py             <- Centralized registry: models, forecast horizons, context windows, API configs
+├── main.py               <- CLI benchmark runner and headless execution engine
+├── app.py                <- Interactive Streamlit dashboard for real-time benchmarking and visual inspection
+├── data/                 <- Local parquet storage (Elia grid actuals, DWD weather, Open-Meteo)
+│   └── predictions_cache.parquet <- Local cache for fast dashboard reloads without re-computing inference
+├── plots/                <- Generated comparison charts (PNG) from headless runs
+└── src/
+    ├── datasource.py     <- API connectors for Elia Open Data and Open-Meteo
+    ├── features.py       <- Feature engineering (calendar, cyclic encoding, lag features, DWD integration)
+    ├── http_client.py    <- HTTP session handler with retries
+    ├── metrics.py        <- Evaluation metrics (RMSE, MAE, WAPE, and 80% CI PICP coverage)
+    ├── models.py         <- Traditional ML pipeline (XGBoost training & iterative inference)
+    ├── models_tsfm.py    <- Unified Adapter pattern (TSFMRunner) for Chronos-2, Timestral-209M, and TimesFM 3.0
+    ├── plotter.py        <- Matplotlib static charts & interactive Plotly visualizer with confidence bands
+    ├── tuning.py         <- Hyperparameter optimization routines
+    └── validate_config.py<- Configuration sanity checks
+```
+
+### Core Infrastructure Components
+
+1. **Centralized Configuration Registry (`config.py`)**:
+   - **Models Registry**: Declarative catalogue mapping model IDs (`xgboost`, `chronos2`, `timestral_209m`, `timesfm3`) to provider packages and Hugging Face checkpoints.
+   - **Harmonized Horizons**: Standard 39-hour forecast horizon (156 steps of 15 min, from 09:00 UTC through midnight of next day).
+   - **Context Window Presets**: Parametric context sizes (`2D`: 192 steps, `7D`: 672 steps, `14D`: 1344 steps, `30D`: 2880 steps) with 14D as default.
+
+2. **Unified Foundation Model Adapter (`src/models_tsfm.py`)**:
+   - `TSFMRunner`: Implements an Adapter pattern providing a consistent execution interface across heterogeneous libraries:
+     - **Amazon Chronos-2** (`amazon/chronos-2`) via `chronos-forecasting`
+     - **Mistral Timestral** (`mistralai/Timestral-209M`) via `timestral`
+     - **Google TimesFM** (`google/timesfm-3.0-pytorch`) via `timesfm`
+   - Handles device allocation (automatic fallback: CUDA -> MPS -> CPU), input tensor formatting, and standardization into `TSFMResult` (median forecast, 10th percentile, 90th percentile).
+
+3. **Standardized Evaluation Metrics (`src/metrics.py`)**:
+   - **Deterministic Metrics**:
+     - RMSE (Root Mean Squared Error in MW)
+     - MAE (Mean Absolute Error in MW)
+     - WAPE (Weighted Absolute Percentage Error in %)
+   - **Probabilistic Calibration**:
+     - Coverage 80% (Prediction Interval Coverage Probability / PICP between q10 and q90).
+
+4. **Interactive Dashboard (`app.py` via Streamlit)**:
+   - Run with:
+     ```bash
+     streamlit run app.py
+     ```
+   - Features:
+     - Interactive date selection for rolling evaluation.
+     - Context window toggle (2D, 7D, 14D, 30D).
+     - Multi-model selection with on-the-fly execution.
+     - Local parquet prediction caching (`data/predictions_cache.parquet`) for instantaneous recall.
+     - Rich Plotly charts with interactive tooltips and shaded uncertainty bands (q10 - q90).
+     - Comparative KPI cards and sortable evaluation summary table.
