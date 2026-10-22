@@ -90,10 +90,9 @@ Elia and Open-Meteo data are downloaded on first run and cached in `data/`. Fore
 ### Chronos-2 implementation
 
 what was done so far:
+- install on the terminal two libraries using: pip install chronos-forecasting torch
 - downloaded and used the library to have the model weights
 - succesfully implemented zero shot for wind_MW over the first 39 time steps of 2026 (39*15 minutes) with context = target variable in 2024
-- prediction horizon (39 hours = 156 timesteps, Jan 1-2 2025)
-- computed 39h RMSE against Elia ground truth and generated unified comparative plots
 
 next steps:
 
@@ -148,3 +147,13 @@ notes:
 - input format: expects a 1D NumPy array `(timesteps,)` with `dtype=np.float32` for single-series forecasting
 - output format: `ForecastOutput` object with `.forecast` (median) and `.quantiles` matrix of shape `(horizon, 9)` corresponding to levels `[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]`
 
+### Base Thinking for an Infrastructure
+
+├── config.py             <- Intervalli di contesto (192, 672, 1344, 2880 step) e lista modelli
+├── data/                 <- Cache locale in formato .parquet (Elia, DWD, Open-Meteo)
+├── src/
+│   ├── data_loader.py    <- Estrazione e normalizzazione dati
+│   ├── models_wrapper.py <- Classe unificata per eseguire i singoli TSFM
+│   └── metrics.py        <- Calcolo di RMSE, MAE, WAPE
+├── main.py               <- Pipeline eseguibile da terminale / motore di calcolo
+└── app.py                <- Interfaccia Streamlit con selettori e grafici Plotly
