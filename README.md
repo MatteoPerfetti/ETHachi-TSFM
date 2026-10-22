@@ -104,3 +104,24 @@ sticking to the official repo tutorial: https://github.com/amazon-science/chrono
 notes:
 - context_df starts in DATA_START and finishes in DATA_END (TRAIN/TEST_START/END are not relevant for this zero shot approach as we don't do train --> test but only give context and get the prediction)
 - pred_df starts in DATA_END and finishes in DATA_END + PREDICTION_LENGHT
+
+### Timestral implementation (Mistral AI)
+
+what was done so far:
+- installed Mistral official timestral library
+- integrated mistralai/Timestral-209M for zero-shot probabilistic forecasting in main.py
+- harmonized shared context (up to 2024-12-31) and prediction horizon (39 hours = 156 timesteps, Jan 1-2 2025)
+- extracted median (50th percentile) and 80% CI (q10, q90)
+- computed 39h RMSE against Elia ground truth and generated unified comparative plots
+
+next steps:
+sticking to the official Mistral repository: https://github.com/mistralai/timestral
+- inject weather covariates using known_covariates and past_covariates
+- compare scaling: Timestral-28M vs Timestral-209M
+- integrate into day-ahead rolling window across 2025
+- evaluate CRPS and Pinball loss alongside RMSE
+
+notes:
+- input tensor: (series=1, variates=1, timesteps)
+- output: 21 quantiles from 0.01 to 0.99
+- zero-shot: no dataset-specific fine-tuning required

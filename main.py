@@ -10,7 +10,10 @@ from src.validate_config import validate_config
 
 import torch
 from chronos import BaseChronosPipeline
+from timestral import TimestralForecaster
 import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import root_mean_squared_error
 
 
 def load_sources() -> dict[str, pd.DataFrame]:
@@ -93,7 +96,14 @@ def run() -> None:
     target = target.loc[features.index]
 
     ######################################################
-    context_df = target.reset_index()
+    # Common settings for TSFM zero-shot forecasting
+    horizon = 4 * 39  # 156 timesteps = 39 hours
+    # Context: only data up to end of 2024, so predictions start at 2025-01-01 00:00
+    context_target = target.loc[target.index < "2025-01-01T00:00:00Z"]
+
+    # ==================== 1. Chronos-2 Zero-Shot ====================
+    logger.info("Running Chronos-2 Zero-Shot...")
+    context_df = context_target.reset_index()
     context_df.columns = ["timestamp", "target"]
     context_df["item_id"] = "wind_belgium"
     context_df = context_df[["item_id", "timestamp", "target"]]
@@ -101,20 +111,90 @@ def run() -> None:
     context_df["timestamp"] = pd.to_datetime(context_df["timestamp"])
     context_df["timestamp"] = context_df["timestamp"].dt.tz_localize(None)
 
-    pipeline = BaseChronosPipeline.from_pretrained(
+    chronos_pipeline = BaseChronosPipeline.from_pretrained(
         "amazon/chronos-2",
         device_map="cpu",
     )
 
-    pred_df = pipeline.predict_df(
+    pred_chronos = chronos_pipeline.predict_df(
         context_df,
-        prediction_length=39,
-        quantile_levels = [0.1, 0.5, 0.9]
+        prediction_length=horizon,
+        quantile_levels=[0.1, 0.5, 0.9]
     )
 
-    print(pred_df.shape)
-    print(pred_df.head())
-    print(pred_df.tail())
+    y_chronos_median = pred_chronos["0.5"].values
+    y_chronos_q10 = pred_chronos["0.1"].values
+    y_chronos_q90 = pred_chronos["0.9"].values
+
+    # ==================== 2. Timestral-209M Zero-Shot ====================
+    logger.info("Running Timestral-209M Zero-Shot...")
+    timestral_forecaster = TimestralForecaster.from_pretrained(
+        "mistralai/Timestral-209M",
+        device="cpu"
+    )
+
+    # Input shape: (series=1, variates=1, time)
+    context_timestral = context_target.values.squeeze().reshape(1, 1, -1)
+
+    forecast_timestral = timestral_forecaster.forecast(
+        context_timestral,
+        prediction_length=horizon
+    )
+
+    y_timestral_median = forecast_timestral.median.squeeze()
+    y_timestral_q10 = forecast_timestral.quantile(0.1).squeeze()
+    y_timestral_q90 = forecast_timestral.quantile(0.9).squeeze()
+
+    # ==================== Ground Truth & Metrics ====================
+    # Real data for the first 39 hours of 2025
+    y_true_39h = target.loc[target.index >= "2025-01-01T00:00:00Z"].iloc[:horizon]
+    y_true_values = y_true_39h.values.squeeze()
+
+    rmse_chronos = root_mean_squared_error(y_true_values, y_chronos_median)
+    rmse_timestral = root_mean_squared_error(y_true_values, y_timestral_median)
+
+    # ==================== Unificated Plot: Reale vs Chronos vs Timestral ====================
+    comparison_df = pd.DataFrame({
+        "Actual_MW": y_true_values,
+        "Chronos2_MW": y_chronos_median,
+        "Timestral209M_MW": y_timestral_median,
+    }, index=y_true_39h.index)
+
+    print("\n" + "=" * 75)
+    print("Values Comparison: REAL (ELIA) vs CHRONOS-2 vs TIMESTRAL-209M")
+    print(f"-> 39h RMSE Chronos-2:      {rmse_chronos:.2f} MW")
+    print(f"-> 39h RMSE Timestral-209M: {rmse_timestral:.2f} MW")
+    print("=" * 75)
+    print("first 8 observations:")
+    print(comparison_df.head(8))
+    print("\nlast 8 observations:")
+    print(comparison_df.tail(8))
+    print("=" * 75 + "\n")
+
+    logger.info("39h Chronos-2     RMSE: %.2f MW", rmse_chronos)
+    logger.info("39h Timestral-209M RMSE: %.2f MW", rmse_timestral)
+
+
+    # ==================== Comparison Plot ====================
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(y_true_39h.index, y_true_values, label="Actual (Elia)", color="#1f77b4", linewidth=2.5)
+    ax.plot(y_true_39h.index, y_chronos_median, label=f"Chronos-2 (RMSE: {rmse_chronos:.1f} MW)", color="#2ca02c", linewidth=2)
+    ax.fill_between(y_true_39h.index, y_chronos_q10, y_chronos_q90, color="#2ca02c", alpha=0.12, label="Chronos 80% CI")
+    ax.plot(y_true_39h.index, y_timestral_median, label=f"Timestral-209M (RMSE: {rmse_timestral:.1f} MW)", color="#d62728", linestyle="--", linewidth=2)
+    ax.fill_between(y_true_39h.index, y_timestral_q10, y_timestral_q90, color="#d62728", alpha=0.12, label="Timestral 80% CI")
+
+    ax.set_title("First 39 Hours of 2025: Actual vs Chronos-2 vs Timestral-209M Zero-Shot")
+    ax.set_xlabel("Date & Time")
+    ax.set_ylabel("Wind Power (MW)")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    plot_path = config.PLOT_DIRECTORY / "forecast_wind_chronos_39h.png"
+    fig.savefig(plot_path, dpi=150)
+    fig.savefig(config.PLOT_DIRECTORY / "forecast_wind_tsfm_comparison_39h.png", dpi=150)
+    logger.info("Plot saved to %s", plot_path)
+    plt.show()
+
     '''
     X_train, X_test, y_train, y_test = split(features, target)
     rmse, y_pred = run_model(config.MODEL_TYPE, X_train, X_test, y_train, y_test)
