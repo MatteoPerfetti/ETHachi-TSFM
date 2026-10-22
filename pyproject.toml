@@ -13,6 +13,10 @@ dependencies = [
     "requests>=2.34.2",
     "scikit-learn>=1.9.1",
     "timesfm>=3.0.2",
+    "timestral",
     "torch>=2.14.1",
     "xgboost>=3.4.1",
 ]
+
+[tool.uv.sources]
+timestral = { git = "https://github.com/mistralai/timestral" }
