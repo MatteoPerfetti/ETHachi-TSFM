@@ -92,6 +92,8 @@ Elia and Open-Meteo data are downloaded on first run and cached in `data/`. Fore
 what was done so far:
 - downloaded and used the library to have the model weights
 - succesfully implemented zero shot for wind_MW over the first 39 time steps of 2026 (39*15 minutes) with context = target variable in 2024
+- prediction horizon (39 hours = 156 timesteps, Jan 1-2 2025)
+- computed 39h RMSE against Elia ground truth and generated unified comparative plots
 
 next steps:
 
@@ -108,20 +110,23 @@ notes:
 ### Timestral implementation (Mistral AI)
 
 what was done so far:
-- installed Mistral official timestral library
+- installed Mistral official timestral library, on hugging face there is the simple command to install it
 - integrated mistralai/Timestral-209M for zero-shot probabilistic forecasting in main.py
-- harmonized shared context (up to 2024-12-31) and prediction horizon (39 hours = 156 timesteps, Jan 1-2 2025)
-- extracted median (50th percentile) and 80% CI (q10, q90)
+- prediction horizon (39 hours = 156 timesteps, Jan 1-2 2025)
 - computed 39h RMSE against Elia ground truth and generated unified comparative plots
 
 next steps:
 sticking to the official Mistral repository: https://github.com/mistralai/timestral
 - inject weather covariates using known_covariates and past_covariates
-- compare scaling: Timestral-28M vs Timestral-209M
-- integrate into day-ahead rolling window across 2025
-- evaluate CRPS and Pinball loss alongside RMSE
+- integrate into day-ahead rolling window across 2025 (same as Chronos)
+
 
 notes:
 - input tensor: (series=1, variates=1, timesteps)
 - output: 21 quantiles from 0.01 to 0.99
 - zero-shot: no dataset-specific fine-tuning required
+
+### Times-FM 3.0 Implementation
+
+what was done so far:
+- installed the library using: uv add timesfm

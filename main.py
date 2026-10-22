@@ -9,6 +9,7 @@ from src.plotter import plot_forecast
 from src.validate_config import validate_config
 
 import torch
+from timesfm import TimesFM3Forecaster
 from chronos import BaseChronosPipeline
 from timestral import TimestralForecaster
 import numpy as np
@@ -145,6 +146,32 @@ def run() -> None:
     y_timestral_q10 = forecast_timestral.quantile(0.1).squeeze()
     y_timestral_q90 = forecast_timestral.quantile(0.9).squeeze()
 
+    # ==================== 2. TimesFM-3-330M Zero-Shot ====================
+
+    logger.info("Loading TimesFM-3-330M model...")
+    timesfm_forecaster = TimesFM3Forecaster.from_pretrained(
+        "google/timesfm-3.0-pytorch",
+        device="cpu",  # Use "cuda" if a compatible GPU is available
+    )
+    # 1. Format input context from shared context_target
+    # TimesFM expects a 1D NumPy float32 array for single time-series forecasting
+    context_timesfm = context_target.values.squeeze().astype(np.float32)
+    logger.info("Generating zero-shot forecast with TimesFM-3-330M...")
+    output_timesfm = timesfm_forecaster.predict(
+        context_timesfm,
+        horizon=horizon,  # Shared variable: 156 timesteps (39 hours)
+        return_quantiles=True,
+    )
+    # 2. Extract median and confidence intervals
+    # output.forecast returns the median prediction (index 4 in the 9 default quantiles)
+    y_timesfm_median = output_timesfm.forecast
+    y_timesfm_q10 = output_timesfm.quantiles[
+        :, 0
+    ]  # 10th percentile (lower bound)
+    y_timesfm_q90 = output_timesfm.quantiles[
+        :, 8
+    ]  # 90th percentile (upper bound)
+
     # ==================== Ground Truth & Metrics ====================
     # Real data for the first 39 hours of 2025
     y_true_39h = target.loc[target.index >= "2025-01-01T00:00:00Z"].iloc[:horizon]
@@ -152,38 +179,43 @@ def run() -> None:
 
     rmse_chronos = root_mean_squared_error(y_true_values, y_chronos_median)
     rmse_timestral = root_mean_squared_error(y_true_values, y_timestral_median)
+    rmse_timesfm = root_mean_squared_error(y_true_values, y_timesfm_median)
 
-    # ==================== Unificated Plot: Reale vs Chronos vs Timestral ====================
+    # ==================== Unified Comparison: Real vs Chronos vs Timestral vs TimesFM ====================
     comparison_df = pd.DataFrame({
         "Actual_MW": y_true_values,
         "Chronos2_MW": y_chronos_median,
         "Timestral209M_MW": y_timestral_median,
+        "TimesFM3_MW": y_timesfm_median,
     }, index=y_true_39h.index)
 
-    print("\n" + "=" * 75)
-    print("Values Comparison: REAL (ELIA) vs CHRONOS-2 vs TIMESTRAL-209M")
+    print("\n" + "=" * 80)
+    print("VALUES COMPARISON: REAL (ELIA) vs CHRONOS-2 vs TIMESTRAL-209M vs TIMESFM-3")
     print(f"-> 39h RMSE Chronos-2:      {rmse_chronos:.2f} MW")
     print(f"-> 39h RMSE Timestral-209M: {rmse_timestral:.2f} MW")
-    print("=" * 75)
-    print("first 8 observations:")
+    print(f"-> 39h RMSE TimesFM-3:      {rmse_timesfm:.2f} MW")
+    print("=" * 80)
+    print("First 8 observations:")
     print(comparison_df.head(8))
-    print("\nlast 8 observations:")
+    print("\nLast 8 observations:")
     print(comparison_df.tail(8))
-    print("=" * 75 + "\n")
+    print("=" * 80 + "\n")
 
-    logger.info("39h Chronos-2     RMSE: %.2f MW", rmse_chronos)
-    logger.info("39h Timestral-209M RMSE: %.2f MW", rmse_timestral)
-
+    logger.info("39h Chronos-2      RMSE: %.2f MW", rmse_chronos)
+    logger.info("39h Timestral-209M  RMSE: %.2f MW", rmse_timestral)
+    logger.info("39h TimesFM-3       RMSE: %.2f MW", rmse_timesfm)
 
     # ==================== Comparison Plot ====================
-    fig, ax = plt.subplots(figsize=(14, 6))
+    fig, ax = plt.subplots(figsize=(15, 6))
     ax.plot(y_true_39h.index, y_true_values, label="Actual (Elia)", color="#1f77b4", linewidth=2.5)
     ax.plot(y_true_39h.index, y_chronos_median, label=f"Chronos-2 (RMSE: {rmse_chronos:.1f} MW)", color="#2ca02c", linewidth=2)
-    ax.fill_between(y_true_39h.index, y_chronos_q10, y_chronos_q90, color="#2ca02c", alpha=0.12, label="Chronos 80% CI")
+    ax.fill_between(y_true_39h.index, y_chronos_q10, y_chronos_q90, color="#2ca02c", alpha=0.10, label="Chronos 80% CI")
     ax.plot(y_true_39h.index, y_timestral_median, label=f"Timestral-209M (RMSE: {rmse_timestral:.1f} MW)", color="#d62728", linestyle="--", linewidth=2)
-    ax.fill_between(y_true_39h.index, y_timestral_q10, y_timestral_q90, color="#d62728", alpha=0.12, label="Timestral 80% CI")
+    ax.fill_between(y_true_39h.index, y_timestral_q10, y_timestral_q90, color="#d62728", alpha=0.10, label="Timestral 80% CI")
+    ax.plot(y_true_39h.index, y_timesfm_median, label=f"TimesFM-3 (RMSE: {rmse_timesfm:.1f} MW)", color="#9467bd", linestyle="-.", linewidth=2)
+    ax.fill_between(y_true_39h.index, y_timesfm_q10, y_timesfm_q90, color="#9467bd", alpha=0.10, label="TimesFM 80% CI")
 
-    ax.set_title("First 39 Hours of 2025: Actual vs Chronos-2 vs Timestral-209M Zero-Shot")
+    ax.set_title("First 39 Hours of 2025: Actual vs Chronos-2 vs Timestral-209M vs TimesFM-3 Zero-Shot")
     ax.set_xlabel("Date & Time")
     ax.set_ylabel("Wind Power (MW)")
     ax.legend(loc="upper right")
