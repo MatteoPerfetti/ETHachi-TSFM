@@ -126,7 +126,27 @@ notes:
 - output: 21 quantiles from 0.01 to 0.99
 - zero-shot: no dataset-specific fine-tuning required
 
-### Times-FM 3.0 Implementation
+### Times-FM 3.0 Implementation (Google Research)
 
 what was done so far:
-- installed the library using: uv add timesfm
+- installed the official library using: `uv add timesfm`
+- integrated `google/timesfm-3.0-pytorch` (330M parameters) into `main.py` for zero-shot forecasting
+- harmonized shared configuration with Chronos-2 and Timestral-209M:
+  - context: historical wind generation (`wind_MW`) up to `2024-12-31 23:45:00 UTC`
+  - prediction horizon: 39 hours (156 timesteps of 15 min, Jan 1-2, 2025)
+- extracted point and probabilistic outputs:
+  - median forecast (`output.forecast`, quantile 0.5)
+  - 80% confidence interval (`output.quantiles` at index 0 for 10% and index 8 for 90%)
+- computed 39h RMSE against actual Elia measurements
+- integrated TimesFM-3 into the consolidated terminal comparison table and comparative 4-way plot
+
+next steps:
+sticking to the official Google Research repository: https://github.com/google-research/timesfm
+- inject numerical weather covariates using TimesFM 3.0 native `past_only_covariates` and `past_future_covariates` arguments
+- integrate TimesFM into the day-ahead rolling window evaluation loop across the entire 2025 test set
+- evaluate GPU acceleration vs CPU inference latency
+
+notes:
+- input format: expects a 1D NumPy array `(timesteps,)` with `dtype=np.float32` for single-series forecasting
+- output format: `ForecastOutput` object with `.forecast` (median) and `.quantiles` matrix of shape `(horizon, 9)` corresponding to levels `[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]`
+- zero-shot capability: pre-trained by Google on over 1 trillion data points, running inference directly without task-specific training
