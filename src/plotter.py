@@ -46,6 +46,7 @@ def plot_forecast(y_test: pd.DataFrame, y_pred: np.ndarray | pd.DataFrame, rmse:
     fig.tight_layout()
 
     if path is not None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=150, facecolor=SURFACE)
     if show:
         plt.show()

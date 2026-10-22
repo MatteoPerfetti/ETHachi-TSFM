@@ -12,6 +12,7 @@ dependencies = [
     "pytest>=9.1.1",
     "requests>=2.34.2",
     "scikit-learn>=1.9.1",
+    "timesfm>=3.0.2",
     "torch>=2.14.1",
     "xgboost>=3.4.1",
 ]

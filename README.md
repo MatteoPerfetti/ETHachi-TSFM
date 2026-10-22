@@ -106,6 +106,47 @@ notes:
 - context_df starts in DATA_START and finishes in DATA_END (TRAIN/TEST_START/END are not relevant for this zero shot approach as we don't do train --> test but only give context and get the prediction)
 - pred_df starts in DATA_END and finishes in DATA_END + PREDICTION_LENGHT
 
+### Timestral implementation (Mistral AI)
+
+what was done so far:
+- installed Mistral official timestral library, on hugging face there is the simple command to install it
+- integrated mistralai/Timestral-209M for zero-shot probabilistic forecasting in main.py
+- prediction horizon (39 hours = 156 timesteps, Jan 1-2 2025)
+- computed 39h RMSE against Elia ground truth and generated unified comparative plots
+
+next steps:
+sticking to the official Mistral repository: https://github.com/mistralai/timestral
+- inject weather covariates using known_covariates and past_covariates
+- integrate into day-ahead rolling window across 2025 (same as Chronos)
+
+
+notes:
+- input tensor: (series=1, variates=1, timesteps)
+- output: 21 quantiles from 0.01 to 0.99
+- zero-shot: no dataset-specific fine-tuning required
+
+### Times-FM 3.0 Implementation (Google Research)
+
+what was done so far:
+- installed the official library using: `uv add timesfm`
+- integrated `google/timesfm-3.0-pytorch` (330M parameters) into `main.py` for zero-shot forecasting
+- harmonized shared configuration with Chronos-2 and Timestral-209M:
+  - context: historical wind generation (`wind_MW`) up to `2024-12-31 23:45:00 UTC`
+  - prediction horizon: 39 hours (156 timesteps of 15 min, Jan 1-2, 2025)
+- extracted the outputs
+- computed 39h RMSE against actual Elia measurements
+- integrated TimesFM-3 into the consolidated terminal comparison table and comparative 4-way plot
+
+next steps:
+Google Research repository: https://github.com/google-research/timesfm
+- inject numerical weather covariates using TimesFM 3.0 native `past_only_covariates` and `past_future_covariates` arguments
+- integrate TimesFM into the day-ahead rolling window evaluation loop across the entire 2025 test set
+- evaluate GPU acceleration vs CPU inference latency
+
+notes:
+- input format: expects a 1D NumPy array `(timesteps,)` with `dtype=np.float32` for single-series forecasting
+- output format: `ForecastOutput` object with `.forecast` (median) and `.quantiles` matrix of shape `(horizon, 9)` corresponding to levels `[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]`
+
 ### Base Thinking for an Infrastructure
 
 ├── config.py             <- Intervalli di contesto (192, 672, 1344, 2880 step) e lista modelli
