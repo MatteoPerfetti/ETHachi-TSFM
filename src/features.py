@@ -24,24 +24,28 @@ def merge(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return complete
 
 # ------
-# Temporary workaround to merge dwd parquet file with weather
+# Temporary DWD/ICON parquet source
 
-def merge_dwd_weather(df: pd.DataFrame, dwd_path: str) -> pd.DataFrame:
-    """Merge the DWD weather data with the Open-Meteo weather data."""
-    # Interpolate the Open-Meteo data to 15min steps, then merge with the DWD data on timestamp
-    df = interpolate_to_15min(df)
-    # Drop 'measured' column from dwd_df
-    dwd_df = pd.read_parquet(dwd_path).set_index("timestamp").drop(columns="measured", errors="ignore")
-    dwd_df.index = pd.to_datetime(dwd_df.index, utc=True).astype(df.index.dtype)
-    logger.info("Loaded DWD weather data from %s (%d rows)", dwd_path, len(dwd_df))
-    # Merge DWD data (PM15M) with Open-Meteo data (PT1H) on timestamp, keeping only rows where both have values
-    merged = df.join(dwd_df, how="outer").sort_index()
-    complete = merged.dropna()
-    dropped = len(merged) - len(complete)
+def load_dwd_weather(dwd_path: str) -> pd.DataFrame:
+    """Load the 15-minute DWD/ICON weather features from parquet."""
+    weather = (
+        pd.read_parquet(dwd_path)
+        .set_index("timestamp")
+        .drop(columns="measured", errors="ignore")
+        .sort_index()
+    )
+    weather.index = pd.to_datetime(weather.index, utc=True)
+    complete = weather.dropna()
+    dropped = len(weather) - len(complete)
     if dropped:
-        missing = merged.isna().sum()
-        logger.warning("Dropped %d of %d rows with missing value due to alignment. Missing per column: %s",
-                        dropped, len(merged), missing[missing > 0].to_dict())
+        missing = weather.isna().sum()
+        logger.warning(
+            "Dropped %d of %d DWD rows with missing values. Missing per column: %s",
+            dropped,
+            len(weather),
+            missing[missing > 0].to_dict(),
+        )
+    logger.info("Loaded DWD/ICON weather data from %s (%d rows)", dwd_path, len(complete))
     return complete
 
 # ------

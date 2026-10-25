@@ -8,19 +8,47 @@ TIMEZONE = "Europe/Brussels"          # timezone for localizing timestamps (e.g,
 # ==========================================
 # ------------- Model selection ----
 # ==========================================
-TRADITIONAL_MODELS = ["xgboost"]
+ML_MODELS = ["xgboost", "lightgbm", "catboost", "ngboost", "tabnet"]  # tabnet and ngboost are very slow
+TRADITIONAL_MODELS = [*ML_MODELS, "sarimax"]
 TSFM_MODELS = ["citras_fm"]
-MODEL_TYPE = "xgboost"              # "xgboost"
+MODEL_TYPE = "catboost"
 # ==========================================
-# ------------- XGBoost config ----
+# ------------- Traditional ML config ------
 # ==========================================
 
-UNTUNED = False  # True: use default hyperparameters, False: tune hyperparameters
-MAX_DEPTH = [1, 3, 5, 7, 9]                # maximum depth of the trees
-N_ESTIMATORS = [50, 100, 200, 300, 400]       # number of trees
-LEARNING_RATE = [0.01, 0.1, 0.2, 0.3]      # learning rate for boosting
-OPTUNA = True  # True: use Optuna for hyperparameter tuning, False: use grid search
-OPTUNA_N_TRIALS = 100  # number of trials for Optuna hyperparameter tuning
+QUANTILES = (0.1, 0.5, 0.9)
+UNTUNED = False
+OPTUNA_N_TRIALS = 10
+ML_FORECAST_STRATEGY = "origin_aligned"  # "origin_aligned" or "fixed_gap"
+
+# ==========================================
+# ------------- SARIMAX config ----
+# ==========================================
+
+SARIMAX_ORDER = (1, 1, 1)  # (p, d, q)
+SARIMAX_SEASONAL_ORDER = (0, 0, 0, 0)  # (P, D, Q, s); seasonal terms
+SARIMAX_FIT_METHOD = "lbfgs"
+SARIMAX_MAXITER = 200
+SARIMAX_LOW_MEMORY = True
+SARIMAX_ENFORCE_STATIONARITY = True
+SARIMAX_ENFORCE_INVERTIBILITY = True
+SARIMAX_COVARIATES = (
+    "wind_speed_120m_mean",
+    "wind_gusts_10m_mean",
+    "wind_direction_120m_mean",
+    "temperature_2m_mean",
+    "relative_humidity_2m_mean",
+    "pressure_msl_mean",
+)
+# Other available DWD covariates to consider:
+# - wind_speed_{80,180}m_mean: tested with the current wind set; no consistent gain.
+# - wind_speed_120m_std and wind_gusts_10m_std: small gain together, about 1.5%
+#   aggregate RMSE on the wind-only set; less than 1% after adding meteo means.
+# - wind_direction_120m_std: tested; no meaningful gain.
+# - temperature_2m_mean, relative_humidity_2m_mean, pressure_msl_mean: tested
+#   together; improved 12-origin 2024 validation RMSE from 905.6 to 778.7 MW.
+# - temperature_2m_std, relative_humidity_2m_std, pressure_msl_std,
+#   surface_pressure_mean/std, and other-height wind/gust statistics: not tested.
 
 # ==========================================
 # ------------- Forecast config ----
@@ -30,22 +58,19 @@ MULTILE_TARGETS = False             # True: multi-target model, False: single-ta
 COVARIATES = True                   # True: use covariates (weather, time features), False: only use lagged target values
 CONTEXT_LENGTH = 96                 # number of past steps used as input to the model
 PREDICTION_LENGTH = 4*39              # number of future steps predicted by the model 
-# FORECAST_DAYTIME = "09:00"           # time of day for the forecast (UTC), 
+FORECAST_DAYTIME = "09:00"           # daily forecast origin in TIMEZONE
 PLOT_DIRECTORY = Path(__file__).resolve().parent / "plots"                  # directory to save forecast plots
 
 # ==========================================
 # ------------- Train/Test split config ----
 # ==========================================
-# Boolean flags to control whether to use train/test split or cross-validation
-USE_CROSS_VALIDATION = False            # True: cross-validation, False: train/test split
-
 TRAIN_START = "2024-01-04T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-TRAIN_END = "2024-01-24T23:45:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
-TEST_START = "2025-01-25T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-TEST_END = "2025-01-31T23:45:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
+TRAIN_END = "2024-12-31T00:00:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
+TEST_START = "2025-05-28T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
+TEST_END = "2025-05-30T00:00:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
 
 # Cross validation (time-based, durations are pandas timedelta strings, e.g. "6h", "2D")
-CV_N_SPLITS = 5
+CV_N_SPLITS = 3
 CV_TEST_SIZE = None                # length of each validation fold, None = train span // (n_splits + 1)
 CV_GAP = "0min"                    # time left out between train and validation fold
 CV_MAX_TRAIN_SIZE = None           # max length of the train window, None = expanding window
@@ -53,7 +78,7 @@ CV_MAX_TRAIN_SIZE = None           # max length of the train window, None = expa
 # ------------- Data Source config ---------
 # ==========================================
 DATA_START = "2024-01-01T00:00:00Z"     # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-DATA_END = "2025-01-31T23:45:00Z"       # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
+DATA_END = "2025-05-31T23:45:00Z"       # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
 
 
 # data folder
@@ -91,5 +116,3 @@ DATA_DWD_PATH = DATA_DIR / "dwd" / "gen_weather_dwd.parquet"
 
 LOG_LEVEL = "INFO"                 # DEBUG, INFO, WARNING, ERROR
 LOG_FILE = None                    # e.g. DATA_DIR / "logs" / "run.log"; None = console only
-
-

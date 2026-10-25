@@ -16,17 +16,19 @@ def validate_config() -> None:
     except (ValueError, TypeError) as e:
         raise ValueError(f"Invalid config: cannot parse timestamps or RESOLUTIONCODE ({e})") from e
 
-    # Lags run from PREDICTION_LENGTH to max_lag steps back (see add_lag_features)
-    max_lag = config.PREDICTION_LENGTH + config.CONTEXT_LENGTH - 1
+    history_steps = (
+        config.CONTEXT_LENGTH
+        if config.ML_FORECAST_STRATEGY == "origin_aligned"
+        else config.PREDICTION_LENGTH + config.CONTEXT_LENGTH - 1
+    )
     rules = [
         (isinstance(config.CONTEXT_LENGTH, int) and config.CONTEXT_LENGTH >= 1,
          "CONTEXT_LENGTH must be an integer >= 1"),
         (isinstance(config.PREDICTION_LENGTH, int) and config.PREDICTION_LENGTH >= 1,
          "PREDICTION_LENGTH must be an integer >= 1"),
         (t["DATA_START"] < t["DATA_END"], "DATA_START must be before DATA_END"),
-        (t["DATA_START"] + max_lag * step <= t["TRAIN_START"],
-         f"TRAIN_START must be at least PREDICTION_LENGTH + CONTEXT_LENGTH - 1 = {max_lag} steps after DATA_START "
-         f"(lag history of the first train row)"),
+        (t["DATA_START"] + history_steps * step <= t["TRAIN_START"],
+         f"TRAIN_START must leave at least {history_steps} history steps after DATA_START"),
         (t["TRAIN_START"] < t["TRAIN_END"], "TRAIN_START must be before TRAIN_END"),
         (t["TRAIN_END"] < t["TEST_START"], "TRAIN_END must be before TEST_START"),
         (t["TEST_START"] < t["TEST_END"], "TEST_START must be before TEST_END"),
