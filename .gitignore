@@ -5,6 +5,7 @@ data/solar/
 data/wind/
 data/weather/
 plots/
+results/
 
 data/predictions_cache.parquet
 .vscode/
