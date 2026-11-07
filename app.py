@@ -100,8 +100,16 @@ def metrics_tab(predictions: pd.DataFrame, models: list[str], window: str, meta:
     table = summary(predictions, window)
     shown = table.rename(columns=SCORE_LABELS)[[SCORE_LABELS[c] for c in SCORE_LABELS if c in table.columns]]
     formats = {"RMSE [MW]": "{:,.1f}", "Winkler 80% [MW]": "{:,.1f}", "vs Persistence": "{:+.0%}", "days": "{:d}"}
-    st.dataframe(shown.style.format({k: v for k, v in formats.items() if k in shown.columns}, na_rep="–")
-                 .highlight_min(subset=["RMSE [MW]", "Winkler 80% [MW]"], color="#d4edda"), width="stretch")
+    best_result_style = "background-color: #d4edda; color: #0b0b0b;"
+    st.dataframe(
+        shown.style
+        .format({k: v for k, v in formats.items() if k in shown.columns}, na_rep="–")
+        .highlight_min(
+            subset=["RMSE [MW]", "Winkler 80% [MW]"],
+            props=best_result_style,
+        ),
+        width="stretch",
+    )
     st.caption("Scores of each forecast, averaged over the days (Predico); lower is better, best in green. "
                "Winkler 80%: width of the q10–q90 interval plus 10× the distance of actual values outside it. "
                "vs Persistence: RMSE relative to persistence (shown if persistence is selected).")
