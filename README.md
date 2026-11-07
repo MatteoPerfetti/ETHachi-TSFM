@@ -81,6 +81,12 @@ Without uv: install the packages listed in `pyproject.toml` with pip (`chronos-f
 `streamlit`, `requests`, `holidays`, `scikit-learn`, and the traditional-model packages). The merged environment
 targets Python 3.14.
 
+Activate the environment:
+```bash
+.venv\Scripts\activate         # Windows
+source .venv/bin/activate      # Linux/macOS
+```
+
 The model weights are downloaded from Hugging Face on first use. The DWD file `data/dwd/gen_weather_dwd.parquet`
 is in the repository; Elia and Open-Meteo data are downloaded on the first run and cached in `data/`.
 

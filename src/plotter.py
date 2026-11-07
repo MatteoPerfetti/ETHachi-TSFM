@@ -48,7 +48,7 @@ def plot_forecast(
     lower: np.ndarray | pd.Series | None = None,
     upper: np.ndarray | pd.Series | None = None,
 ) -> plt.Figure:
-    """Compatibility plot for one non-rolling train/test forecast."""
+    """Plot one non-rolling train/test forecast, including an optional interval."""
     if isinstance(y_test, pd.Series):
         y_test = y_test.to_frame()
     prediction = pd.DataFrame(

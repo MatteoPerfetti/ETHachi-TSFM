@@ -39,7 +39,7 @@ TSFM_MODELS = [key for key, value in MODELS_REGISTRY.items() if value["type"] ==
 # as an offline workflow in src/MLtrad.py and is never started by app.py.
 TRADITIONAL_QUANTILES = (0.1, 0.5, 0.9)
 TRADITIONAL_STRATEGIES = ("origin_aligned", "fixed_gap")
-TRADITIONAL_STRATEGY = "origin_aligned"
+TRADITIONAL_STRATEGY = "fixed_gap"
 TRADITIONAL_CONTEXT_STEPS = 96
 TRADITIONAL_MODEL_PARAMETERS = {
     "xgboost": {},
