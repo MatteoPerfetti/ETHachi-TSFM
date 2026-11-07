@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
 
+import config
+from src.backtest import BacktestSettings, run_backtest
+from src.dataset import Dataset
 from src.forecast import ForecastRequest
 from src.models_traditional import TraditionalMLAdapter
 
@@ -83,3 +86,41 @@ def test_xgboost_adapter_fits_and_returns_shared_quantile_result():
     assert result.quantiles.columns.tolist() == ["q10", "q50", "q90"]
     assert len(result.quantiles) == 4
     assert result.quantiles.notna().all().all()
+
+
+def test_shared_backtest_runs_both_traditional_feature_modes(monkeypatch):
+    index = pd.date_range("2024-01-01", "2024-01-07", freq="15min", tz="UTC")
+    values = np.arange(len(index))
+    dataset = Dataset(
+        target=pd.Series(1000 + 100 * np.sin(values / 25), index=index, name="wind_MW"),
+        weather=pd.DataFrame({"weather": np.cos(values / 18)}, index=index),
+    )
+    monkeypatch.setitem(
+        config.TRADITIONAL_MODEL_PARAMETERS,
+        "xgboost",
+        {
+            "n_estimators": 5,
+            "max_depth": 2,
+            "learning_rate": 0.1,
+            "subsample": 1.0,
+            "colsample_bytree": 1.0,
+        },
+    )
+
+    for strategy in config.TRADITIONAL_STRATEGIES:
+        settings = BacktestSettings(
+            train_start="2024-01-01T00:00:00Z",
+            train_end="2024-01-04T00:00:00Z",
+            test_start="2024-01-05T00:00:00Z",
+            test_end="2024-01-06T00:00:00Z",
+            horizon_steps=4,
+            context_steps=8,
+            covariates=["weather"],
+            traditional_strategy=strategy,
+        )
+        result = run_backtest(dataset, ["xgboost"], settings)
+
+        assert len(result.predictions) == 4
+        assert result.predictions["model"].unique().tolist() == [f"XGBoost [{strategy}]"]
+        assert result.predictions[["q10", "q50", "q90"]].notna().all().all()
+        assert result.model_configs[f"XGBoost [{strategy}]"]["strategy"] == strategy
