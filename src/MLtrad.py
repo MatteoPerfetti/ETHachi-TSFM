@@ -55,19 +55,19 @@ DEFAULT_PARAMETERS = {
         "l2_leaf_reg": 3.0,
     },
     "ngboost": {
-        "n_estimators": 500,
-        "learning_rate": 0.03,
-        "minibatch_frac": 1.0,
-        "col_sample": 1.0,
+        "n_estimators": 150,              # default 500
+        "learning_rate": 0.05,            # default 0.03
+        "minibatch_frac": 0.5,            # default 1.0
+        "col_sample": 0.7,                # default 1.0
     },
     "tabnet": {
-        "n_d": 16,
-        "n_a": 16,
-        "n_steps": 5,
-        "gamma": 1.5,
-        "lambda_sparse": 1e-4,
-        "optimizer_lr": 0.02,
-        "max_epochs": 100,
+        "n_d": 8,                        # default 16
+        "n_a": 8,                        # default 16
+        "n_steps": 3,                    # default 5
+        "gamma": 1.3,                    # default 1.5
+        "lambda_sparse": 1e-4,           # default 1e-4
+        "optimizer_lr": 0.02,            # default 2e-2
+        "max_epochs": 25,                # default 100    
     },
 }
 
