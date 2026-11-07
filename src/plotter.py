@@ -78,7 +78,7 @@ def plot_benchmark_comparison(
     path: str | Path | None = None,
     show: bool = False,
 ) -> plt.Figure:
-    """Traccia il grafico di confronto Matplotlib tra il valore reale (Elia) e i modelli benchmark."""
+    """Plot observed values (Elia) against benchmark model forecasts using Matplotlib."""
     timestamps = y_true.index
     y_true_vals = np.asarray(y_true).squeeze()
 
@@ -138,13 +138,13 @@ def create_plotly_comparison(
     forecasts: dict[str, dict[str, np.ndarray]],
     metrics: dict[str, dict[str, float]] | None = None,
 ) -> go.Figure:
-    """Genera una figura interattiva Plotly con curve e bande di confidenza attivabili/disattivabili."""
+    """Create an interactive Plotly chart with toggleable forecast curves and prediction intervals."""
     timestamps = y_true.index
     y_true_vals = np.asarray(y_true).squeeze()
 
     fig = go.Figure()
 
-    # Valore reale
+    # Observed values
     fig.add_trace(
         go.Scatter(
             x=timestamps,
@@ -152,7 +152,7 @@ def create_plotly_comparison(
             mode="lines",
             name="Actual (Elia)",
             line=dict(color=MODEL_COLORS.get("Actual", "#1f77b4"), width=3),
-            hovertemplate="<b>Actual (Elia)</b><br>Data: %{x}<br>Potenza: %{y:.1f} MW<extra></extra>",
+            hovertemplate="<b>Actual (Elia)</b><br>Date: %{x}<br>Power: %{y:.1f} MW<extra></extra>",
         )
     )
 
@@ -167,11 +167,11 @@ def create_plotly_comparison(
         if metrics and model_name in metrics and "RMSE" in metrics[model_name]:
             rmse_str = f" (RMSE: {metrics[model_name]['RMSE']:.1f} MW)"
 
-        # Banda di confidenza 80% CI (q10 -> q90) se presente
+        # 80% prediction interval (q10 -> q90), when available
         q10 = preds.get("q10")
         q90 = preds.get("q90")
         if q10 is not None and q90 is not None:
-            # Limite superiore q90 (trasparente)
+            # Upper bound q90 (transparent)
             fig.add_trace(
                 go.Scatter(
                     x=timestamps,
@@ -182,7 +182,7 @@ def create_plotly_comparison(
                     hoverinfo="skip",
                 )
             )
-            # Limite inferiore q10 con fill 'tonexty'
+            # Lower bound q10 with 'tonexty' fill
             fig.add_trace(
                 go.Scatter(
                     x=timestamps,
@@ -196,7 +196,7 @@ def create_plotly_comparison(
                 )
             )
 
-        # Curva mediana principale
+        # Main median forecast curve
         dash_style = "solid"
         if model_name == "Timestral-209M":
             dash_style = "dash"
@@ -212,14 +212,14 @@ def create_plotly_comparison(
                 mode="lines",
                 name=f"{model_name}{rmse_str}",
                 line=dict(color=color, width=2.2, dash=dash_style),
-                hovertemplate=f"<b>{model_name}</b><br>Data: %{{x}}<br>Potenza: %{{y:.1f}} MW<extra></extra>",
+                hovertemplate=f"<b>{model_name}</b><br>Date: %{{x}}<br>Power: %{{y:.1f}} MW<extra></extra>",
             )
         )
 
     fig.update_layout(
-        title="Confronto Previsione Orizzonte 39 Ore: Reale vs Time Series Foundation Models",
-        xaxis_title="Data e Ora",
-        yaxis_title="Potenza Eolica (MW)",
+        title="39-hour forecast comparison: Observed vs Time Series Foundation Models",
+        xaxis_title="Date and time",
+        yaxis_title="Wind power (MW)",
         hovermode="x unified",
         template="plotly_white",
         legend=dict(

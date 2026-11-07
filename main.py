@@ -23,7 +23,7 @@ from src.validate_config import validate_config
 
 
 def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
-    """Carica i dati grezzi Elia e Open-Meteo da cache parquet locale o tramite API."""
+    """Load raw Elia and Open-Meteo data from the local Parquet cache or APIs."""
     features_data = {}
     targets_data = {}
     for name, src in config.ELIA_SOURCES.items():
@@ -39,7 +39,7 @@ def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
 
 
 def load_features(features_data: dict[str, pd.DataFrame], target: pd.DataFrame) -> pd.DataFrame:
-    """Allinea a 15 min, calcola direzioni, lag tabulari e feature di calendario."""
+    """Align data to 15-minute intervals and build direction, lag, and calendar features."""
     if config.DATA_USE_DWD:
         features = merge_dwd_weather(features_data["weather"], config.DATA_DWD_PATH)
     else:
@@ -56,7 +56,7 @@ def load_features(features_data: dict[str, pd.DataFrame], target: pd.DataFrame) 
 
 
 def load_targets(targets_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Prepara il DataFrame del target aggregando le colonne se single-target."""
+    """Prepare the target DataFrame, aggregating columns for single-target forecasting."""
     target = targets_data[config.TARGET_SOURCE]
     if config.MULTILE_TARGETS:
         target = target.add_prefix(f"{config.TARGET_SOURCE}_")
@@ -68,7 +68,7 @@ def load_targets(targets_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def split(X: pd.DataFrame, y: pd.DataFrame):
-    """Esegue train/test split o cross-validation per i modelli tradizionali."""
+    """Perform a train/test split or cross-validation for traditional models."""
     if config.USE_CROSS_VALIDATION:
         X_folds = cross_validation_splits(X, config.CV_N_SPLITS, config.CV_TEST_SIZE, config.CV_GAP, config.CV_MAX_TRAIN_SIZE)
         y_folds = cross_validation_splits(y, config.CV_N_SPLITS, config.CV_TEST_SIZE, config.CV_GAP, config.CV_MAX_TRAIN_SIZE)
@@ -85,23 +85,23 @@ def split(X: pd.DataFrame, y: pd.DataFrame):
 
 
 def run() -> None:
-    # 0. Validazione preliminare dei parametri
+    # 0. Validate settings
     validate_config()
 
-    # 1. Caricamento dati grezzi
+    # 1. Load raw data
     features_data, targets_data = load_sources()
 
-    # 2. Preparazione target e feature
+    # 2. Prepare target and features
     target = load_targets(targets_data)
     features = load_features(features_data, target)
     target = target.loc[features.index]
 
-    # 3. Definizione orizzonte e contesto
-    horizon = config.HORIZON_STEPS  # 156 step = 39 ore
+    # 3. Define horizon and context
+    horizon = config.HORIZON_STEPS  # 156 step = 39 hours
     context_target_all = target.loc[target.index < config.TEST_START]
     
-    # Seleziona la finestra di contesto standard configurata
-    context_steps = config.DEFAULT_CONTEXT  # 1344 step = 14 giorni
+    # Select the configured default context window
+    context_steps = config.DEFAULT_CONTEXT  # 1344 step = 14 days
     if len(context_target_all) > context_steps:
         context_window = context_target_all.iloc[-context_steps:]
     else:
@@ -109,7 +109,7 @@ def run() -> None:
 
     logger.info("Context target timesteps: %d (Window: %s)", len(context_window), "14D")
 
-    # Ground truth per le 39 ore
+    # Ground truth for the 39-hour horizon
     y_true_39h = target.loc[target.index >= config.TEST_START].iloc[:horizon]
     y_true_vals = y_true_39h.values.squeeze()
 
@@ -152,7 +152,7 @@ def run() -> None:
         y_true_vals, res_timesfm.median, res_timesfm.q10, res_timesfm.q90
     )
 
-    # ==================== 4. XGBoost Baseline (Opzionale) ====================
+    # ==================== 4. XGBoost Baseline (Optional) ====================
     run_xgboost = "xgboost" in config.TRADITIONAL_MODELS
     if run_xgboost:
         logger.info("Running XGBoost Baseline...")
@@ -165,7 +165,7 @@ def run() -> None:
         except Exception as e:
             logger.warning("Could not execute XGBoost baseline: %s", e)
 
-    # ==================== Report Metriche ====================
+    # ==================== Metrics report ====================
     summary_df = metrics_summary_table(all_metrics)
     print("\n" + "=" * 80)
     print(f"BENCHMARK METRICS SUMMARY: {config.TARGET_SOURCE.upper()} (Horizon: {horizon} steps / 39h)")
@@ -173,7 +173,7 @@ def run() -> None:
     print(summary_df.to_string())
     print("=" * 80 + "\n")
 
-    # ==================== Salvataggio Cache Predizioni ====================
+    # ==================== Save prediction cache ====================
     cache_dict = {"Actual_MW": y_true_vals}
     for model_name, preds in forecasts.items():
         cache_dict[f"{model_name}_median"] = preds["median"]
@@ -186,7 +186,7 @@ def run() -> None:
     cache_df.to_parquet(cache_path)
     logger.info("Predictions saved to cache at %s", cache_path)
 
-    # ==================== Salvataggio Grafico Comparativo ====================
+    # ==================== Save comparison chart ====================
     plot_path = config.PLOT_DIRECTORY / "forecast_wind_tsfm_comparison_39h.png"
     plot_benchmark_comparison(
         y_true_39h,

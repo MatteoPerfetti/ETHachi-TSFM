@@ -23,7 +23,7 @@ from src.models_tsfm import TSFMRunner
 from src.plotter import create_plotly_comparison
 from src.validate_config import validate_config
 
-# Configurazione pagina Streamlit
+# Streamlit page configuration
 st.set_page_config(
     page_title="ETHachi-TSFM Benchmark Dashboard",
     page_icon="⚡",
@@ -32,9 +32,9 @@ st.set_page_config(
 )
 
 
-@st.cache_data(show_spinner="Caricamento dataset Elia e Open-Meteo...")
+@st.cache_data(show_spinner="Loading Elia and Open-Meteo datasets...")
 def get_cached_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Carica e prepara i dati storici (cache locale o API)."""
+    """Load and prepare historical data from the local cache or APIs."""
     validate_config()
     features_data = {}
     targets_data = {}
@@ -50,14 +50,14 @@ def get_cached_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
                 config.DATA_START, config.DATA_END
             )
 
-    # Preparazione target
+    # Prepare target
     target = targets_data[config.TARGET_SOURCE]
     if config.MULTILE_TARGETS:
         target = target.add_prefix(f"{config.TARGET_SOURCE}_").add_suffix("_MW")
     else:
         target = target.sum(axis=1).to_frame(name=f"{config.TARGET_SOURCE}_MW")
 
-    # Preparazione feature
+    # Prepare features
     if config.DATA_USE_DWD:
         features = merge_dwd_weather(features_data["weather"], config.DATA_DWD_PATH)
     else:
@@ -74,23 +74,23 @@ def get_cached_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
     return features, target
 
 
-@st.cache_resource(show_spinner="Inizializzazione modello...")
+@st.cache_resource(show_spinner="Initializing model...")
 def get_cached_model(model_key: str):
-    """Carica i pesi del modello una sola volta in memoria RAM/GPU."""
+    """Load model weights into RAM/GPU memory once."""
     return TSFMRunner.load_model(model_key)
 
 
 def main():
     st.title("⚡ ETHachi-TSFM: Benchmark Time Series Foundation Models")
     st.markdown(
-        "Dashboard per la valutazione comparativa di **Chronos-2**, **Timestral-209M**, "
-        "**TimesFM-3.0** e baseline **XGBoost** sulla produzione eolica (Elia Open Data)."
+        "Dashboard for comparing **Chronos-2**, **Timestral-209M**, "
+        "**TimesFM-3.0** and the **XGBoost** baseline on wind power generation (Elia Open Data)."
     )
 
     # ==================== SIDEBAR ====================
-    st.sidebar.header("⚙ Parametri Benchmark")
+    st.sidebar.header("⚙ Benchmark settings")
 
-    st.sidebar.subheader("1. Modelli da Eseguire")
+    st.sidebar.subheader("1. Models to run")
     sel_chronos = st.sidebar.checkbox("Chronos-2 (Amazon)", value=True)
     sel_timestral = st.sidebar.checkbox("Timestral-209M (Mistral)", value=True)
     sel_timesfm = st.sidebar.checkbox("TimesFM-3.0 (Google)", value=True)
@@ -106,75 +106,75 @@ def main():
     if sel_xgboost:
         selected_models.append("xgboost")
 
-    st.sidebar.subheader("2. Finestra di Contesto")
+    st.sidebar.subheader("2. Context window")
     context_options = list(config.CONTEXT_WINDOWS.keys())
     default_ctx_idx = context_options.index("14D") if "14D" in context_options else 0
     selected_context = st.sidebar.selectbox(
-        "Profondità Storica (Context Window):",
+        "Historical context window:",
         options=context_options,
         index=default_ctx_idx,
-        help="Durata dell'orizzonte passato passato ai modelli per inferire pattern e stagionalità.",
+        help="Length of historical data supplied to the models to infer patterns and seasonality.",
     )
     context_steps = config.CONTEXT_WINDOWS[selected_context]
 
-    st.sidebar.subheader("3. Data Inizio Previsione")
+    st.sidebar.subheader("3. Forecast start date")
     forecast_date = st.sidebar.date_input(
-        "Data Forecast (UTC):",
+        "Forecast date (UTC):",
         value=datetime.date(2025, 1, 1),
         min_value=datetime.date(2024, 1, 1),
         max_value=datetime.date(2025, 12, 28),
     )
     start_ts_str = f"{forecast_date.strftime('%Y-%m-%d')}T00:00:00Z"
 
-    st.sidebar.markdown(f"**Orizzonte Fisso:** 39 ore ({config.HORIZON_STEPS} step da 15min)")
+    st.sidebar.markdown(f"**Fixed horizon:** 39 hours ({config.HORIZON_STEPS} steps of 15 minutes)")
 
     cache_path = config.DATA_DIR / "predictions_cache.parquet"
     has_cache = cache_path.exists()
     use_cache = False
     if has_cache:
-        use_cache = st.sidebar.checkbox("Usa ultima cache calcolata", value=True)
+        use_cache = st.sidebar.checkbox("Use the latest cached predictions", value=True)
 
-    run_btn = st.sidebar.button("🚀 Esegui Benchmark", type="primary", use_container_width=True)
+    run_btn = st.sidebar.button("🚀 Run benchmark", type="primary", use_container_width=True)
 
-    # Carica dataset
+    # Load dataset
     features, target = get_cached_dataset()
 
-    # Verifica timestamp
+    # Check timestamps
     target_idx = target.index
     horizon = config.HORIZON_STEPS
 
-    # Filtra context e ground truth
+    # Filter context and ground truth
     context_target_all = target.loc[target_idx < start_ts_str]
     y_true_horizon = target.loc[target_idx >= start_ts_str].iloc[:horizon]
 
     if len(context_target_all) < context_steps:
         st.warning(
-            f"Dati di contesto disponibili ({len(context_target_all)}) inferiori agli step richiesti ({context_steps}). "
-            "Verranno usati tutti i dati antecedenti disponibili."
+            f"Available context ({len(context_target_all)} steps) is shorter than requested ({context_steps} steps). "
+            "All available preceding observations will be used."
         )
         context_target = context_target_all
     else:
         context_target = context_target_all.iloc[-context_steps:]
 
     if len(y_true_horizon) < horizon:
-        st.error(f"Dati reali insufficienti a partire da {start_ts_str} per coprire l'orizzonte di 39 ore ({horizon} step).")
+        st.error(f"Insufficient observations from {start_ts_str} to cover the 39-hour horizon ({horizon} steps).")
         return
 
     y_true_vals = y_true_horizon.values.squeeze()
 
-    # Contenitore risultati
+    # Results containers
     forecasts = {}
     metrics_all = {}
 
     should_run = run_btn or (use_cache and has_cache)
 
     if not should_run:
-        st.info("👈 Configura i parametri nella barra laterale e premi **'Esegui Benchmark'** per iniziare.")
+        st.info("👈 Configure the settings in the sidebar and click **'Run benchmark'** to begin.")
         return
 
-    # Esecuzione da cache se richiesta e non premuto il tasto di ricalcolo forzato
+    # Use cached predictions when requested unless a fresh run is triggered
     if use_cache and has_cache and not run_btn:
-        st.success(f"Caricamento previsioni dalla cache (`{cache_path.name}`).")
+        st.success(f"Loading predictions from cache (`{cache_path.name}`).")
         cache_df = pd.read_parquet(cache_path)
         common_idx = y_true_horizon.index.intersection(cache_df.index)
         if len(common_idx) == horizon:
@@ -189,23 +189,23 @@ def main():
                     forecasts[m_name] = {"median": median, "q10": q10, "q90": q90}
                     metrics_all[m_name] = calculate_metrics(y_true_vals, median, q10, q90)
         else:
-            st.warning("La cache esistente non corrisponde alla data selezionata. Ricalcolo in corso...")
+            st.warning("The existing cache does not match the selected date. Recomputing...")
             should_run_fresh = True
     else:
         should_run_fresh = True
 
     if not forecasts:
         if not selected_models:
-            st.warning("Seleziona almeno un modello nella sidebar.")
+            st.warning("Select at least one model in the sidebar.")
             return
 
-        progress_bar = st.progress(0, text="Inizio calcolo previsioni...")
+        progress_bar = st.progress(0, text="Starting forecast computation...")
         total_steps = len(selected_models)
         current_step = 0
 
         # Chronos-2
         if "chronos2" in selected_models:
-            progress_bar.progress(int((current_step / total_steps) * 100), text="Esecuzione Chronos-2...")
+            progress_bar.progress(int((current_step / total_steps) * 100), text="Running Chronos-2...")
             m = get_cached_model("chronos2")
             res = TSFMRunner.run_chronos(context_target, horizon=horizon, model=m)
             forecasts["Chronos-2"] = {"median": res.median, "q10": res.q10, "q90": res.q90}
@@ -214,7 +214,7 @@ def main():
 
         # Timestral-209M
         if "timestral_209m" in selected_models:
-            progress_bar.progress(int((current_step / total_steps) * 100), text="Esecuzione Timestral-209M...")
+            progress_bar.progress(int((current_step / total_steps) * 100), text="Running Timestral-209M...")
             m = get_cached_model("timestral_209m")
             res = TSFMRunner.run_timestral(context_target, horizon=horizon, model=m)
             forecasts["Timestral-209M"] = {"median": res.median, "q10": res.q10, "q90": res.q90}
@@ -223,7 +223,7 @@ def main():
 
         # TimesFM-3
         if "timesfm3" in selected_models:
-            progress_bar.progress(int((current_step / total_steps) * 100), text="Esecuzione TimesFM-3.0...")
+            progress_bar.progress(int((current_step / total_steps) * 100), text="Running TimesFM-3.0...")
             m = get_cached_model("timesfm3")
             res = TSFMRunner.run_timesfm(context_target, horizon=horizon, model=m)
             forecasts["TimesFM-3"] = {"median": res.median, "q10": res.q10, "q90": res.q90}
@@ -232,7 +232,7 @@ def main():
 
         # XGBoost Baseline
         if "xgboost" in selected_models:
-            progress_bar.progress(int((current_step / total_steps) * 100), text="Esecuzione XGBoost...")
+            progress_bar.progress(int((current_step / total_steps) * 100), text="Running XGBoost...")
             try:
                 X_train, X_test, y_train, y_test = split_train_test(
                     features, config.TRAIN_START, config.TRAIN_END, config.TEST_START, config.TEST_END
@@ -242,12 +242,12 @@ def main():
                 forecasts["XGBoost"] = {"median": y_xgb_39h}
                 metrics_all["XGBoost"] = calculate_metrics(y_true_vals, y_xgb_39h)
             except Exception as e:
-                st.error(f"Errore durante l'esecuzione di XGBoost: {e}")
+                st.error(f"Error running XGBoost: {e}")
             current_step += 1
 
-        progress_bar.progress(100, text="Calcolo completato!")
+        progress_bar.progress(100, text="Computation complete!")
 
-        # Aggiorna la cache parquet
+        # Update the Parquet cache
         cache_dict = {"Actual_MW": y_true_vals}
         for name, preds in forecasts.items():
             cache_dict[f"{name}_median"] = preds["median"]
@@ -257,8 +257,8 @@ def main():
         cache_df = pd.DataFrame(cache_dict, index=y_true_horizon.index)
         cache_df.to_parquet(cache_path)
 
-    # ==================== SEZIONE METRICHE (SCORECARDS) ====================
-    st.markdown("### 📊 Risultati & Scorecard Metriche")
+    # ==================== METRIC SCORECARDS ====================
+    st.markdown("### 📊 Results and metric scorecards")
     cols = st.columns(len(forecasts))
     for col, (model_name, m_dict) in zip(cols, metrics_all.items()):
         with col:
@@ -269,18 +269,18 @@ def main():
             if "Coverage_80CI" in m_dict:
                 st.metric("Coverage (80% CI)", f"{m_dict['Coverage_80CI']:.1f}%")
 
-    # ==================== GRAFICO PLOTLY ====================
-    st.markdown("### 📈 Visualizzazione Grafica Interattiva")
-    st.caption("Fai clic sulle voci della legenda per attivare/disattivare curve e bande di confidenza.")
+    # ==================== PLOTLY CHART ====================
+    st.markdown("### 📈 Interactive forecast chart")
+    st.caption("Click legend entries to show or hide forecast curves and prediction intervals.")
     fig = create_plotly_comparison(y_true_horizon, forecasts, metrics=metrics_all)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ==================== TABELLA DATI ED EXPORT ====================
-    with st.expander("📋 Tabella Dati Dettagliata & Export CSV"):
+    # ==================== DATA TABLE AND EXPORT ====================
+    with st.expander("📋 Detailed data table and CSV export"):
         summary_table = metrics_summary_table(metrics_all)
         st.dataframe(summary_table.style.highlight_min(axis=0, color="#d4edda", subset=["RMSE", "MAE", "WAPE"]), use_container_width=True)
 
-        # Tabella previsioni punto per punto
+        # Predictions at each time step
         table_dict = {"Actual (MW)": y_true_vals}
         for name, preds in forecasts.items():
             table_dict[f"{name} Median"] = preds["median"]
@@ -293,7 +293,7 @@ def main():
 
         csv_data = df_preds.to_csv().encode("utf-8")
         st.download_button(
-            label="📥 Scarica Previsioni in CSV",
+            label="📥 Download predictions as CSV",
             data=csv_data,
             file_name=f"benchmark_tsfm_{forecast_date}_{selected_context}.csv",
             mime="text/csv",

@@ -43,16 +43,16 @@ COVARIATES = True                      # True: use covariates (weather, time fea
 
 # TSFM prediction horizons & context windows
 PREDICTION_HORIZON_HOURS = 39
-HORIZON_STEPS = 4 * PREDICTION_HORIZON_HOURS  # 156 timesteps (15 minuti)
+HORIZON_STEPS = 4 * PREDICTION_HORIZON_HOURS  # 156 timesteps (15 minutes)
 PREDICTION_LENGTH = HORIZON_STEPS             # backward compatibility for lag features pipeline
 
 CONTEXT_WINDOWS = {
-    "2D": 192,                         # 2 giorni
-    "7D": 672,                         # 7 giorni
-    "14D": 1344,                       # 14 giorni
-    "30D": 2880,                       # 30 giorni
+    "2D": 192,                         # 2 days
+    "7D": 672,                         # 7 days
+    "14D": 1344,                       # 14 days
+    "30D": 2880,                       # 30 days
 }
-DEFAULT_CONTEXT = 1344                 # 14 giorni come default bilanciato
+DEFAULT_CONTEXT = 1344                 # 14 days as a balanced default
 CONTEXT_LENGTH = 96                    # number of past steps used as input for traditional lag models
 # FORECAST_DAYTIME = "09:00"            # time of day for the forecast (UTC), 
 PLOT_DIRECTORY = Path(__file__).resolve().parent / "plots"  # directory to save forecast plots
