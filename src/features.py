@@ -35,7 +35,8 @@ def merge(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
 def merge_dwd_weather(df: pd.DataFrame, dwd_path: str) -> pd.DataFrame:
     """Merge the DWD weather data with the Open-Meteo weather data."""
     # Interpolate the Open-Meteo data to 15min steps, then merge with the DWD data on timestamp
-    df = interpolate_to_15min(df)
+    # Same "weather_" prefix as merge() gives the Open-Meteo columns, so column names don't depend on DATA_USE_DWD
+    df = interpolate_to_15min(df).add_prefix("weather_")
     # Drop 'measured' column from dwd_df
     dwd_df = pd.read_parquet(dwd_path)
     dwd_df["timestamp"] = pd.to_datetime(dwd_df["timestamp"], utc=True)
