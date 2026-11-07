@@ -67,6 +67,7 @@ def load_forecaster(model_key: str, settings: BacktestSettings) -> Forecaster:
             strategy=settings.traditional_strategy,
             horizon_steps=settings.horizon_steps,
             latency_steps=settings.latency_steps,
+            issue_time=settings.issue_time,
         )
     if config.MODELS_REGISTRY.get(model_key, {}).get("type") == "tsfm":
         from src.models_tsfm import load_tsfm

@@ -35,6 +35,7 @@ class TraditionalMLAdapter(Forecaster):
         latency_steps: int,
         context_steps: int = config.TRADITIONAL_CONTEXT_STEPS,
         parameters: dict | None = None,
+        issue_time: str = config.BACKTEST_ISSUE_TIME,
     ) -> None:
         if model_key not in config.TRADITIONAL_MODELS:
             raise ValueError(f"Unknown traditional model: {model_key}")
@@ -47,6 +48,7 @@ class TraditionalMLAdapter(Forecaster):
         self.latency_steps = latency_steps
         self.context_steps = context_steps
         self.parameters = dict(parameters or {})
+        self.issue_time = issue_time
         self.name = f"{config.MODELS_REGISTRY[model_key]['name']} [{strategy}]"
         self.min_context = (
             context_steps
@@ -64,6 +66,7 @@ class TraditionalMLAdapter(Forecaster):
             "model_key": self.model_key,
             "strategy": self.strategy,
             "context_steps": self.context_steps,
+            "issue_time": self.issue_time,
             "parameters": self.parameters or "defaults",
         }
 
@@ -88,7 +91,7 @@ class TraditionalMLAdapter(Forecaster):
                 end=target.index[-1] + STEP,
                 context_length=self.context_steps,
                 prediction_length=self.horizon_steps,
-                forecast_time=config.BACKTEST_ISSUE_TIME,
+                forecast_time=self.issue_time,
                 timezone="UTC",
                 frequency=STEP,
                 latency_steps=self.latency_steps,
@@ -181,6 +184,7 @@ def load_traditional(
     strategy: str,
     horizon_steps: int,
     latency_steps: int,
+    issue_time: str,
 ) -> TraditionalMLAdapter:
     """Create an untuned/configured traditional benchmark adapter."""
     return TraditionalMLAdapter(
@@ -189,4 +193,5 @@ def load_traditional(
         horizon_steps=horizon_steps,
         latency_steps=latency_steps,
         parameters=config.TRADITIONAL_MODEL_PARAMETERS[model_key],
+        issue_time=issue_time,
     )
