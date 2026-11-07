@@ -1,4 +1,36 @@
 # ETHachi-TSFM
+
+## Moirai in a separate PyTorch environment
+
+`src/models_tsfm.py` keeps Moirai behind the same result interface as the other
+TSFMs. The process bridge in `src/moirai_process.py` exchanges the context and
+forecast through temporary CSV files, while `src/moirai_worker.py` loads and runs
+the model in a separate Python process. This lets the worker use a different
+Python and PyTorch installation without importing Moirai or Uni2TS in Streamlit.
+
+Create a separate environment with a Python version supported by Uni2TS (for
+example, Python 3.11), then install a PyTorch build compatible with that Python
+and your CPU/CUDA setup. Install the remaining worker dependencies afterward:
+
+```powershell
+py -3.11 -m venv .venv-moirai
+.\.venv-moirai\Scripts\python.exe -m pip install --upgrade pip
+# Install the compatible PyTorch build using the command for your platform.
+.\.venv-moirai\Scripts\python.exe -m pip install -r requirements-moirai.txt
+```
+
+Set `MOIRAI_PYTHON` to the environment's Python executable before starting
+Streamlit. For example, on Windows:
+
+```powershell
+$env:MOIRAI_PYTHON = (Resolve-Path .\.venv-moirai\Scripts\python.exe).Path
+streamlit run app.py
+```
+
+On macOS/Linux, point the same variable to `.venv-moirai/bin/python`. Select
+**Moirai 1.1-R-Large (Salesforce)** in the sidebar to run it. If the variable
+is missing or the worker fails, the error is surfaced instead of silently
+falling back to the main environment.
 Repository TSFM for Hitachi Energy (Energy Now! 5.0 Challenge): Benchmarking Time Series Foundation Models for Renewable Energy Forecasting
 
 ## Forecast

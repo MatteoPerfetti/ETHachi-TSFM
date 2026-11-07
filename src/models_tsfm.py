@@ -10,6 +10,7 @@ from timesfm import TimesFM3Forecaster
 
 import config
 from logger import logger
+from src.moirai_process import run_moirai_process
 
 
 @dataclass
@@ -34,7 +35,7 @@ class TSFMResult:
 
 
 class TSFMRunner:
-    """Pattern Adapter unificato per il caricamento e l'inferenza di Chronos, Timestral e TimesFM."""
+    """Adapter per TSFM eseguiti localmente o in un ambiente Python isolato."""
 
     @staticmethod
     def get_default_device() -> str:
@@ -52,6 +53,12 @@ class TSFMRunner:
 
         checkpoint = model_info["checkpoint"]
         provider = model_info.get("provider", "")
+
+        if provider == "salesforce":
+            raise RuntimeError(
+                "Moirai runs in a separate Python environment. "
+                "Use TSFMRunner.run_moirai() instead of load_model()."
+            )
 
         logger.info("Caricamento pesi modello %s (%s) su %s...", model_key, checkpoint, device)
 
@@ -161,6 +168,27 @@ class TSFMRunner:
         return TSFMResult(median=median, q10=q10, q90=q90, model_name="TimesFM-3")
 
     @classmethod
+    def run_moirai(
+        cls,
+        y_context: pd.Series | pd.DataFrame,
+        horizon: int = config.HORIZON_STEPS,
+        model: Any | None = None,
+        weather_covariates: pd.DataFrame | None = None,
+        device: str = "cpu",
+    ) -> TSFMResult:
+        """Run Moirai in the interpreter configured by MOIRAI_PYTHON."""
+        del model, weather_covariates
+
+        predictions = run_moirai_process(y_context, horizon, device)
+
+        return TSFMResult(
+            median=predictions["median"].to_numpy(),
+            q10=predictions["q10"].to_numpy(),
+            q90=predictions["q90"].to_numpy(),
+            model_name="Moirai 1.1-R-Large",
+        )
+
+    @classmethod
     def run_model(
         cls,
         model_key: str,
@@ -177,6 +205,8 @@ class TSFMRunner:
             return cls.run_timestral(y_context, horizon, model=model, weather_covariates=weather_covariates, device=device)
         elif model_key == "timesfm3":
             return cls.run_timesfm(y_context, horizon, model=model, weather_covariates=weather_covariates, device=device)
+        elif model_key == "moirai11rlarge":
+            return cls.run_moirai(y_context, horizon, model=model, weather_covariates=weather_covariates, device=device or "cpu")
         else:
             raise ValueError(f"Esecuzione per il modello '{model_key}' non implementata in TSFMRunner")
 

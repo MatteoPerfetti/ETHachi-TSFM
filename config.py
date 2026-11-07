@@ -29,6 +29,11 @@ MODELS_REGISTRY = {
         "checkpoint": "google/timesfm-3.0-pytorch",
         "provider": "google",
     },
+    "moirai11rlarge": {
+        "type": "tsfm",
+        "checkpoint": "Salesforce/moirai-1.1-R-large",
+        "provider": "salesforce",
+    },
 }
 TRADITIONAL_MODELS = [k for k, v in MODELS_REGISTRY.items() if v["type"] == "traditional"]
 TSFM_MODELS = [k for k, v in MODELS_REGISTRY.items() if v["type"] == "tsfm"]

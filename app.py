@@ -94,6 +94,7 @@ def main():
     sel_chronos = st.sidebar.checkbox("Chronos-2 (Amazon)", value=True)
     sel_timestral = st.sidebar.checkbox("Timestral-209M (Mistral)", value=True)
     sel_timesfm = st.sidebar.checkbox("TimesFM-3.0 (Google)", value=True)
+    sel_moirai = st.sidebar.checkbox("Moirai 1.1-R-Large (Salesforce)", value=True)
     sel_xgboost = st.sidebar.checkbox("XGBoost Baseline", value=False)
 
     selected_models = []
@@ -103,6 +104,8 @@ def main():
         selected_models.append("timestral_209m")
     if sel_timesfm:
         selected_models.append("timesfm3")
+    if sel_moirai:
+        selected_models.append("moirai11rlarge")
     if sel_xgboost:
         selected_models.append("xgboost")
 
@@ -228,6 +231,14 @@ def main():
             res = TSFMRunner.run_timesfm(context_target, horizon=horizon, model=m)
             forecasts["TimesFM-3"] = {"median": res.median, "q10": res.q10, "q90": res.q90}
             metrics_all["TimesFM-3"] = calculate_metrics(y_true_vals, res.median, res.q10, res.q90)
+            current_step += 1
+
+        # Moirai runs in its own Python environment to isolate its PyTorch dependencies.
+        if "moirai11rlarge" in selected_models:
+            progress_bar.progress(int((current_step / total_steps) * 100), text="Esecuzione Moirai 1.1-R-Large...")
+            res = TSFMRunner.run_moirai(context_target, horizon=horizon)
+            forecasts[res.model_name] = {"median": res.median, "q10": res.q10, "q90": res.q90}
+            metrics_all[res.model_name] = calculate_metrics(y_true_vals, res.median, res.q10, res.q90)
             current_step += 1
 
         # XGBoost Baseline
