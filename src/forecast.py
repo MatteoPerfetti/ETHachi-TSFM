@@ -21,7 +21,7 @@ def _check_utc_index(index: pd.Index, what: str) -> None:
         raise ValueError(f"{what}: expected a non-empty DatetimeIndex")
     if str(index.tz) != "UTC":
         raise ValueError(f"{what}: timestamps must be UTC, got tz={index.tz}")
-    if len(index) > 1 and not (np.diff(index.asi8) == STEP.value).all():
+    if len(index) > 1 and not ((index[1:] - index[:-1]) == STEP).all():
         raise ValueError(f"{what}: timestamps must be regular with step {STEP}")
 
 
