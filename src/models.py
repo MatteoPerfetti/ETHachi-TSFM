@@ -8,6 +8,7 @@ import pandas as pd
 
 def _to_index_tz(value: str | pd.Timestamp, index: pd.DatetimeIndex) -> pd.Timestamp:
     """Parse a timestamp (UTC if no zone is given) and match the timezone awareness of the index."""
+    index = pd.DatetimeIndex(pd.to_datetime(index, utc=True))
     ts = pd.Timestamp(value)
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
     return ts if index.tz is not None else ts.tz_convert(None)

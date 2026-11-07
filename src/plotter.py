@@ -1,68 +1,90 @@
 from pathlib import Path
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 
-# Colors: categorical slots 1 & 2 of the default palette, recessive ink and grid
-ACTUAL_COLOR = "#2a78d6"
-PREDICTED_COLOR = "#eb6834"
+import config
+from logger import logger
+from src.metrics import rmse, select_window
+
+# Colors: recessive ink, grid and surface of the default palette
 TEXT_PRIMARY = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
+TEXT_MUTED = "#898781"
 GRID_COLOR = "#e4e3df"
+AXIS_COLOR = "#c3c2b7"
 SURFACE = "#fcfcfb"
+
+# Backtest plot: one fixed color per model (the color follows the model, whatever subset is plotted),
+# categorical slots of the default palette in order; the actual values are always in primary ink.
+BACKTEST_COLORS = {
+    "Chronos-2": "#2a78d6",
+    "Timestral-209M": "#eb6834",
+    "TimesFM-3": "#1baf7a",
+    "Persistence": "#eda100",
+    "XGBoost [origin_aligned]": "#6250d6",
+    "XGBoost [fixed_gap]": "#9b8cf0",
+    "LightGBM [origin_aligned]": "#008300",
+    "LightGBM [fixed_gap]": "#62ad62",
+    "CatBoost [origin_aligned]": "#e34948",
+    "CatBoost [fixed_gap]": "#ed8c8c",
+    "NGBoost [origin_aligned]": "#b45f06",
+    "NGBoost [fixed_gap]": "#dc9a55",
+    "TabNet [origin_aligned]": "#087f9c",
+    "TabNet [fixed_gap]": "#62b3c7",
+}
+FALLBACK_COLORS = ["#e87ba4", "#008300", "#6250d6", "#e34948"]  # next slots, for models not listed above
 
 
 def plot_forecast(
-    y_test: pd.DataFrame,
-    y_pred: np.ndarray | pd.DataFrame,
+    y_test: pd.Series | pd.DataFrame,
+    y_pred: np.ndarray | pd.Series | pd.DataFrame,
     rmse: float | None = None,
     path: str | Path | None = None,
     show: bool = True,
     lower: np.ndarray | pd.Series | None = None,
     upper: np.ndarray | pd.Series | None = None,
 ) -> plt.Figure:
-    """Plot y_pred against y_test over the test time horizon, one panel per target column.
-
-    y_pred may be the raw model.predict output; it takes its timestamps and column names from y_test.
-    If `path` is given the figure is saved there; `show` opens it in a window.
-    """
-    y_pred = pd.DataFrame(np.asarray(y_pred).reshape(len(y_test), -1), index=y_test.index, columns=y_test.columns)
-    lower_frame = None if lower is None else pd.DataFrame(
-        np.asarray(lower).reshape(len(y_test), -1),
+    """Compatibility plot for one non-rolling train/test forecast."""
+    if isinstance(y_test, pd.Series):
+        y_test = y_test.to_frame()
+    prediction = pd.DataFrame(
+        np.asarray(y_pred).reshape(len(y_test), -1),
         index=y_test.index,
         columns=y_test.columns,
+    )
+    lower_frame = None if lower is None else pd.DataFrame(
+        np.asarray(lower).reshape(len(y_test), -1), index=y_test.index, columns=y_test.columns
     )
     upper_frame = None if upper is None else pd.DataFrame(
-        np.asarray(upper).reshape(len(y_test), -1),
-        index=y_test.index,
-        columns=y_test.columns,
+        np.asarray(upper).reshape(len(y_test), -1), index=y_test.index, columns=y_test.columns
     )
 
-    n = len(y_test.columns)
-    fig, axes = plt.subplots(n, 1, figsize=(12, 3.5 * n), sharex=True, squeeze=False, facecolor=SURFACE)
-    for ax, col in zip(axes[:, 0], y_test.columns):
+    fig, axes = plt.subplots(
+        len(y_test.columns),
+        1,
+        figsize=(12, 3.5 * len(y_test.columns)),
+        sharex=True,
+        squeeze=False,
+        facecolor=SURFACE,
+    )
+    for ax, column in zip(axes[:, 0], y_test.columns):
         ax.set_facecolor(SURFACE)
-        ax.plot(y_test.index, y_test[col], color=ACTUAL_COLOR, linewidth=2, label="Actual")
-        # Dashed line: prediction is distinguishable without relying on color alone
-        ax.plot(y_pred.index, y_pred[col], color=PREDICTED_COLOR, linewidth=2, linestyle="--", label="Q50")
+        ax.plot(y_test.index, y_test[column], color="#2a78d6", linewidth=2, label="Actual")
+        ax.plot(prediction.index, prediction[column], color="#eb6834", linewidth=2,
+                linestyle="--", label="Q50")
         if lower_frame is not None and upper_frame is not None:
-            ax.fill_between(
-                y_test.index,
-                lower_frame[col],
-                upper_frame[col],
-                color=PREDICTED_COLOR,
-                alpha=0.18,
-                label="Q10-Q90",
-            )
-        ax.set_title(col, loc="left", color=TEXT_PRIMARY, fontsize=11)
+            ax.fill_between(y_test.index, lower_frame[column], upper_frame[column],
+                            color="#eb6834", alpha=0.18, label="Q10-Q90")
+        ax.set_title(column, loc="left", color=TEXT_PRIMARY, fontsize=11)
         ax.set_ylabel("MW", color=TEXT_SECONDARY)
-        ax.tick_params(colors=TEXT_SECONDARY)
         ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8)
         for side in ("top", "right", "left"):
             ax.spines[side].set_visible(False)
-        ax.spines["bottom"].set_color(GRID_COLOR)
-        ax.legend(loc="upper right", frameon=False, labelcolor=TEXT_SECONDARY)
+        ax.legend(loc="upper right", frameon=False)
 
     title = "Forecast vs. actual (test period)"
     if rmse is not None:
@@ -70,7 +92,6 @@ def plot_forecast(
     fig.suptitle(title, x=0.01, ha="left", color=TEXT_PRIMARY, fontsize=13)
     fig.autofmt_xdate()
     fig.tight_layout()
-
     if path is not None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=150, facecolor=SURFACE)
@@ -78,136 +99,165 @@ def plot_forecast(
         plt.show()
     return fig
 
-# SARIMAX ROLLING FORECASTS
+def model_colors(models: list[str]) -> dict[str, str]:
+    """Fixed color of each model; models not in BACKTEST_COLORS take the next palette slots."""
+    fallback = iter(FALLBACK_COLORS)
+    return {m: BACKTEST_COLORS.get(m) or next(fallback, TEXT_SECONDARY) for m in models}
 
-def plot_rolling_forecasts(
-    results: pd.DataFrame,
-    rmse: float | None = None,
-    timezone: str | None = None,
-    path: str | Path | None = None,
-    show: bool = True,
-    forecast_name: str = "SARIMAX",
-    lower_column: str | None = None,
-    upper_column: str | None = None,
-    title_note: str | None = "weather proxy; not vintage-verified",
-) -> plt.Figure:
-    """Plot every rolling forecast horizon against the actual series."""
-    data = results.reset_index().copy()
 
-    actual = (
-        data[["target_time", "actual"]]
-        .dropna(subset=["actual"])
-        .drop_duplicates(subset="target_time")
-        .sort_values("target_time")
-    )
+def _rgba(hex_color: str, alpha: float) -> str:
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r}, {g}, {b}, {alpha})"
 
-    fig, ax = plt.subplots(
-        figsize=(14, 6),
-        facecolor=SURFACE,
-    )
 
-    ax.set_facecolor(SURFACE)
+def plot_backtest(predictions: pd.DataFrame, run_name: str,
+                  start: str = config.BACKTEST_PLOT_START, end: str = config.BACKTEST_PLOT_END,
+                  models: list[str] | None = config.BACKTEST_PLOT_MODELS,
+                  path: str | Path | None = None, show: bool = False) -> plt.Figure:
+    """Forecast vs actual over [start, end), one panel per model, from the backtest predictions table.
 
-    # Plot every rolling forecast as a separate trajectory.
-    for number, (origin, fold) in enumerate(
-        data.groupby("forecast_origin", sort=True)
-    ):
-        fold = fold.sort_values("target_time")
+    Each panel stitches the D+1 part (next day 00:00-23:45) of consecutive daily forecasts, so every timestamp
+    is shown once: a jump at midnight is the switch to the next forecast. Line = q50, band = q10-q90 (if any).
+    Panels are ordered by RMSE in the window; `path` = None saves to PLOT_DIRECTORY/backtest_<run>_<start>_<end>.png.
+    """
+    start_ts, end_ts = pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
+    rows = select_window(predictions, "d+1")
+    rows = rows[(rows["timestamp"] >= start_ts) & (rows["timestamp"] < end_ts)]
+    available = rows["model"].unique().tolist()
+    models = available if models is None else [m for m in models if m in available]
+    if not models:
+        raise ValueError(f"no forecasts in {start}..{end} for models {models}, available: {available}")
 
-        ax.plot(
-            fold["target_time"],
-            fold["predicted"],
-            color=PREDICTED_COLOR,
-            linewidth=1.5,
-            alpha=0.55,
-            label=(
-                f"Rolling {forecast_name} forecasts"
-                if number == 0
-                else None
-            ),
-        )
+    panels = {model: rows[rows["model"] == model].sort_values("timestamp") for model in models}
+    errors = {model: rmse(d["actual"], d["q50"]) for model, d in panels.items()}
+    order = sorted(models, key=errors.get)
+    colors = model_colors(order)
 
-        if lower_column is not None and upper_column is not None:
-            ax.fill_between(
-                fold["target_time"],
-                fold[lower_column],
-                fold[upper_column],
-                color=PREDICTED_COLOR,
-                alpha=0.10,
-                label="Q10-Q90" if number == 0 else None,
-            )
+    fig, axes = plt.subplots(len(order), 1, figsize=(13, 2.5 * len(order) + 1), sharex=True, sharey=True,
+                             squeeze=False, facecolor=SURFACE)
+    for ax, model in zip(axes[:, 0], order):
+        d = panels[model]
+        t = d["timestamp"].dt.tz_localize(None)
+        ax.set_facecolor(SURFACE)
+        if d["q10"].notna().all() and d["q90"].notna().all():
+            ax.fill_between(t, d["q10"], d["q90"], color=colors[model], alpha=0.18, linewidth=0, label="q10–q90")
+        ax.plot(t, d["actual"], color=TEXT_PRIMARY, linewidth=1.4, label="Actual (Elia)")
+        ax.plot(t, d["q50"], color=colors[model], linewidth=2, label="Forecast q50")
 
-        ax.scatter(
-            fold["target_time"].iloc[0],
-            fold["predicted"].iloc[0],
-            color=PREDICTED_COLOR,
-            s=22,
-            alpha=0.8,
-            zorder=3,
-        )
+        ax.set_title(f"{model}   ·   RMSE D+1 in this window {errors[model]:,.0f} MW", loc="left",
+                     color=TEXT_PRIMARY, fontsize=11)
+        ax.set_ylabel("MW", color=TEXT_SECONDARY)
+        ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8)
+        ax.tick_params(colors=TEXT_MUTED, labelsize=9)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(AXIS_COLOR)
+        # Legend on the title line, outside the data area
+        ax.legend(loc="lower right", bbox_to_anchor=(1, 1), frameon=False, fontsize=9,
+                  labelcolor=TEXT_SECONDARY, ncol=3, borderaxespad=0.2)
 
-    ax.plot(
-        actual["target_time"],
-        actual["actual"],
-        color=ACTUAL_COLOR,
-        linewidth=2.4,
-        label="Actual",
-        zorder=4,
-    )
-
-    title = f"Rolling forecast horizons · {forecast_name}"
-
-    if title_note is not None:
-        title += f" ({title_note})"
-
-    if rmse is not None:
-        title += f" · Overall RMSE {rmse:,.1f} MW"
-
-    ax.set_title(
-        title,
-        loc="left",
-        color=TEXT_PRIMARY,
-        fontsize=13,
-    )
-
-    ax.set_xlabel(
-        f"Target time"
-        + (f" ({timezone})" if timezone else "")
-    )
-    ax.set_ylabel("MW", color=TEXT_SECONDARY)
-
-    ax.grid(
-        axis="y",
-        color=GRID_COLOR,
-        linewidth=0.8,
-    )
-
-    for side in ("top", "right", "left"):
-        ax.spines[side].set_visible(False)
-
-    ax.spines["bottom"].set_color(GRID_COLOR)
-
-    ax.legend(
-        loc="upper right",
-        frameon=False,
-    )
-
-    fig.autofmt_xdate()
+    days = (end_ts - start_ts).days
+    locator = mdates.DayLocator(interval=max(1, days // 8))
+    axes[-1, 0].xaxis.set_major_locator(locator)
+    axes[-1, 0].xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    regions = "+".join(config.ELIA_SOURCES[config.TARGET_SOURCE]["region"])
+    fig.suptitle(f"{config.TARGET_SOURCE.capitalize()} ({regions}): forecasts issued daily at "
+                 f"{config.BACKTEST_ISSUE_TIME} UTC, D+1 part stitched, "
+                 f"{start_ts:%d %b} – {end_ts - pd.Timedelta(days=1):%d %b %Y}\nrun {run_name}",
+                 x=0.01, ha="left", color=TEXT_PRIMARY, fontsize=12)
     fig.tight_layout()
 
-    if path is not None:
-        Path(path).parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        fig.savefig(
-            path,
-            dpi=150,
-            facecolor=SURFACE,
-        )
-
+    if path is None:
+        path = config.PLOT_DIRECTORY / f"backtest_{run_name}_{start_ts:%Y%m%d}_{end_ts:%Y%m%d}.png"
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130, facecolor=SURFACE)
+    logger.info("Forecast plot saved to %s", path)
     if show:
         plt.show()
-
     return fig
+
+# ------------- Interactive (Plotly) versions, used by the dashboard (app.py) -------------
+def _plotly_layout(fig: go.Figure, title: str, y_title: str = "MW") -> go.Figure:
+    fig.update_layout(
+        title=dict(text=title, x=0.01, font=dict(color=TEXT_PRIMARY, size=15)),
+        template="plotly_white", paper_bgcolor=SURFACE, plot_bgcolor=SURFACE, hovermode="x unified",
+        # Vertical legend right of the plot area, so it never overlaps the title or the data
+        showlegend=True,
+        legend=dict(title=dict(text="Model", font=dict(color=TEXT_SECONDARY)), orientation="v",
+                    x=1.01, xanchor="left", y=1, yanchor="top", itemwidth=40,
+                    font=dict(color=TEXT_PRIMARY, size=13), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=60, r=20, t=60, b=40), height=520,
+        yaxis=dict(title=y_title, gridcolor=GRID_COLOR, zeroline=False),
+        xaxis=dict(showgrid=False, linecolor=AXIS_COLOR),
+    )
+    return fig
+
+
+def _add_model_traces(fig: go.Figure, d: pd.DataFrame, model: str, color: str, bands: bool) -> None:
+    """q10-q90 band (toggled with its line through the legend group) and q50 line of one model."""
+    if bands and d["q10"].notna().all() and d["q90"].notna().all():
+        fig.add_trace(go.Scatter(x=d["timestamp"], y=d["q90"], mode="lines", line=dict(width=0),
+                                 legendgroup=model, showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=d["timestamp"], y=d["q10"], mode="lines", line=dict(width=0),
+                                 fill="tonexty", fillcolor=_rgba(color, 0.15), legendgroup=model,
+                                 showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=d["timestamp"], y=d["q50"], mode="lines", name=model, legendgroup=model,
+                             line=dict(color=color, width=2.5),
+                             hovertemplate=f"{model}: %{{y:,.0f}} MW<extra></extra>"))
+
+
+def _add_actual_trace(fig: go.Figure, d: pd.DataFrame) -> None:
+    fig.add_trace(go.Scatter(x=d["timestamp"], y=d["actual"], mode="lines", name="Actual (Elia)",
+                             line=dict(color=TEXT_PRIMARY, width=1.6),
+                             hovertemplate="Actual: %{y:,.0f} MW<extra></extra>"))
+
+
+def plotly_backtest_period(predictions: pd.DataFrame, start: str, end: str, models: list[str],
+                           bands: bool = True) -> go.Figure:
+    """Interactive plot_backtest: D+1 parts of consecutive forecasts stitched over [start, end), models overlaid."""
+    start_ts, end_ts = pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
+    rows = select_window(predictions, "d+1")
+    rows = rows[(rows["timestamp"] >= start_ts) & (rows["timestamp"] < end_ts) & rows["model"].isin(models)]
+    fig = go.Figure()
+    if rows.empty:
+        return _plotly_layout(fig, "No forecasts in the selected period")
+    colors = model_colors(models)
+    for model in models:
+        _add_model_traces(fig, rows[rows["model"] == model].sort_values("timestamp"), model, colors[model], bands)
+    _add_actual_trace(fig, rows.drop_duplicates("timestamp").sort_values("timestamp"))
+    return _plotly_layout(fig, f"D+1 forecasts stitched, {start_ts:%d %b %Y} – "
+                               f"{end_ts - pd.Timedelta(days=1):%d %b %Y} (line q50, band q10–q90)")
+
+
+def plotly_single_forecast(predictions: pd.DataFrame, issue_time: pd.Timestamp, models: list[str],
+                           bands: bool = True) -> go.Figure:
+    """Every step of the forecasts issued at `issue_time`; the dotted line marks the start of D+1."""
+    rows = predictions[(predictions["issue_time"] == issue_time) & predictions["model"].isin(models)]
+    fig = go.Figure()
+    if rows.empty:
+        return _plotly_layout(fig, f"No forecast issued at {issue_time}")
+    colors = model_colors(models)
+    for model in models:
+        _add_model_traces(fig, rows[rows["model"] == model].sort_values("timestamp"), model, colors[model], bands)
+    _add_actual_trace(fig, rows.drop_duplicates("timestamp").sort_values("timestamp"))
+    next_day = issue_time.normalize() + pd.Timedelta(days=1)
+    fig.add_vline(x=next_day, line=dict(color=AXIS_COLOR, dash="dot"))
+    fig.add_annotation(x=next_day, y=1, yref="paper", text="D+1", showarrow=False, xanchor="left",
+                       font=dict(color=TEXT_MUTED))
+    return _plotly_layout(fig, f"Forecast issued {issue_time:%Y-%m-%d %H:%M} UTC, {rows['lead_step'].max() + 1} steps")
+
+
+def plotly_daily_scores(daily: pd.DataFrame, metric: str, models: list[str]) -> go.Figure:
+    """Daily `metric` ("RMSE" or "Winkler80") of each model over the test period, from metrics.daily_scores."""
+    fig = go.Figure()
+    colors = model_colors(models)
+    for model in models:
+        if model not in daily.index.get_level_values("model"):
+            continue
+        d = daily.loc[model].reset_index()
+        if d[metric].isna().all():
+            continue
+        fig.add_trace(go.Scatter(x=d["issue_time"], y=d[metric], mode="lines", name=model,
+                                 line=dict(color=colors[model], width=1.6),
+                                 hovertemplate=f"{model}: %{{y:,.0f}} MW<extra></extra>"))
+    return _plotly_layout(fig, f"Daily {metric} per forecast (issue day on the x axis)", y_title=f"{metric} [MW]")

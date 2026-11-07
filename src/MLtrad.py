@@ -157,12 +157,13 @@ def build_origin_aligned_dataset(
     forecast_time: str,
     timezone: str,
     frequency: str | pd.Timedelta = "15min",
+    latency_steps: int = 0,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Build one pooled tabular row per forecast origin and lead step.
 
-    Every horizon row receives the same target context ending immediately
-    before its forecast origin. Target-time covariates and ``lead_step`` vary
-    across the horizon. The resulting index is
+    Every horizon row receives the same target context ending
+    ``latency_steps`` before its forecast origin. Target-time covariates and
+    ``lead_step`` vary across the horizon. The resulting index is
     ``(forecast_origin, target_time)``.
     """
     target_series = _target_series(target).sort_index()
@@ -197,7 +198,9 @@ def build_origin_aligned_dataset(
     )
 
     context_by_origin = np.column_stack([
-        target_series.reindex(origins - lag * step).to_numpy()
+        target_series.reindex(
+            origins - (latency_steps + lag) * step
+        ).to_numpy()
         for lag in range(1, context_length + 1)
     ])
     context = pd.DataFrame(

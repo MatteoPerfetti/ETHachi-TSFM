@@ -1,118 +1,157 @@
 from pathlib import Path
-# ==========================================
-# ------------- General config ----
-# ==========================================
-COUNTRY = "BE"                         # country code for holidays (ISO 3166-1 alpha-2)
-TIMEZONE = "Europe/Brussels"          # timezone for localizing timestamps (e.g, "Europe/Brussels")
 
 # ==========================================
-# ------------- Model selection ----
+# ------------- General config ------------
 # ==========================================
-ML_MODELS = ["xgboost", "lightgbm", "catboost", "ngboost", "tabnet"]  # tabnet and ngboost are very slow
-TRADITIONAL_MODELS = [*ML_MODELS, "sarimax"]
-TSFM_MODELS = ["citras_fm"]
-MODEL_TYPE = "catboost"
-# ==========================================
-# ------------- Traditional ML config ------
-# ==========================================
+COUNTRY = "BE"
+TIMEZONE = "Europe/Brussels"
 
-QUANTILES = (0.1, 0.5, 0.9)
-UNTUNED = False
+# ==========================================
+# ------------- Model selection -----------
+# ==========================================
+MODELS_REGISTRY = {
+    "persistence": {"type": "baseline", "name": "Persistence"},
+    "xgboost": {"type": "traditional", "name": "XGBoost"},
+    "lightgbm": {"type": "traditional", "name": "LightGBM"},
+    "catboost": {"type": "traditional", "name": "CatBoost"},
+    "ngboost": {"type": "traditional", "name": "NGBoost"},
+    "tabnet": {"type": "traditional", "name": "TabNet"},
+    "chronos2": {
+        "type": "tsfm",
+        "checkpoint": "amazon/chronos-2",
+        "provider": "amazon",
+    },
+    "timestral_209m": {
+        "type": "tsfm",
+        "checkpoint": "mistralai/Timestral-209M",
+        "provider": "mistral",
+    },
+    "timesfm3": {
+        "type": "tsfm",
+        "checkpoint": "google/timesfm-3.0-pytorch",
+        "provider": "google",
+    },
+}
+TRADITIONAL_MODELS = [key for key, value in MODELS_REGISTRY.items() if value["type"] == "traditional"]
+TSFM_MODELS = [key for key, value in MODELS_REGISTRY.items() if value["type"] == "tsfm"]
+
+# Dashboard runs use configured/default parameters. Optuna remains available
+# as an offline workflow in src/MLtrad.py and is never started by app.py.
+TRADITIONAL_QUANTILES = (0.1, 0.5, 0.9)
+TRADITIONAL_STRATEGIES = ("origin_aligned", "fixed_gap")
+TRADITIONAL_STRATEGY = "origin_aligned"
+TRADITIONAL_CONTEXT_STEPS = 96
+TRADITIONAL_MODEL_PARAMETERS = {
+    "xgboost": {},
+    "lightgbm": {},
+    "catboost": {},
+    "ngboost": {},
+    "tabnet": {},
+}
 OPTUNA_N_TRIALS = 10
-ML_FORECAST_STRATEGY = "origin_aligned"  # "origin_aligned" or "fixed_gap"
 
 # ==========================================
-# ------------- SARIMAX config ----
+# ------------- Forecast config -----------
 # ==========================================
+TARGET_SOURCE = "wind"
+MULTILE_TARGETS = False
+COVARIATES = True
 
-SARIMAX_ORDER = (1, 1, 1)  # (p, d, q)
-SARIMAX_SEASONAL_ORDER = (0, 0, 0, 0)  # (P, D, Q, s); seasonal terms
-SARIMAX_FIT_METHOD = "lbfgs"
-SARIMAX_MAXITER = 200
-SARIMAX_LOW_MEMORY = True
-SARIMAX_ENFORCE_STATIONARITY = True
-SARIMAX_ENFORCE_INVERTIBILITY = True
-SARIMAX_COVARIATES = (
-    "wind_speed_120m_mean",
-    "wind_gusts_10m_mean",
-    "wind_direction_120m_mean",
-    "temperature_2m_mean",
-    "relative_humidity_2m_mean",
-    "pressure_msl_mean",
-)
-# Other available DWD covariates to consider:
-# - wind_speed_{80,180}m_mean: tested with the current wind set; no consistent gain.
-# - wind_speed_120m_std and wind_gusts_10m_std: small gain together, about 1.5%
-#   aggregate RMSE on the wind-only set; less than 1% after adding meteo means.
-# - wind_direction_120m_std: tested; no meaningful gain.
-# - temperature_2m_mean, relative_humidity_2m_mean, pressure_msl_mean: tested
-#   together; improved 12-origin 2024 validation RMSE from 905.6 to 778.7 MW.
-# - temperature_2m_std, relative_humidity_2m_std, pressure_msl_std,
-#   surface_pressure_mean/std, and other-height wind/gust statistics: not tested.
+# Weather covariates passed as known future covariates. Traditional models use
+# the same selected columns so every model is evaluated with the same inputs.
+TSFM_USE_COVARIATES = True
+TSFM_COVARIATES = {
+    "wind": [
+        "wind_speed_10m_mean",
+        "wind_speed_80m_mean",
+        "wind_speed_120m_mean",
+        "wind_speed_180m_mean",
+        "wind_gusts_10m_mean",
+        "wind_sin_120m_mean",
+        "wind_cos_120m_mean",
+    ],
+    "solar": [
+        "weather_direct_radiation",
+        "weather_diffuse_radiation",
+        "weather_direct_normal_irradiance",
+        "weather_cloud_cover_low",
+        "weather_cloud_cover_mid",
+        "weather_cloud_cover_high",
+    ],
+}
+
+PREDICTION_HORIZON_HOURS = 39
+HORIZON_STEPS = 4 * PREDICTION_HORIZON_HOURS
+PREDICTION_LENGTH = HORIZON_STEPS
+CONTEXT_LENGTH = TRADITIONAL_CONTEXT_STEPS
+
+CONTEXT_WINDOWS = {"2D": 192, "7D": 672, "14D": 1344, "30D": 2880}
+DEFAULT_CONTEXT = 1344
+PLOT_DIRECTORY = Path(__file__).resolve().parent / "plots"
 
 # ==========================================
-# ------------- Forecast config ----
+# ------------- Rolling backtest ----------
 # ==========================================
-TARGET_SOURCE = "wind"              # name of the target source
-MULTILE_TARGETS = False             # True: multi-target model, False: single-target model
-COVARIATES = True                   # True: use covariates (weather, time features), False: only use lagged target values
-CONTEXT_LENGTH = 96                 # number of past steps used as input to the model
-PREDICTION_LENGTH = 4*39              # number of future steps predicted by the model 
-FORECAST_DAYTIME = "09:00"           # daily forecast origin in TIMEZONE
-PLOT_DIRECTORY = Path(__file__).resolve().parent / "plots"                  # directory to save forecast plots
+BACKTEST_MODELS = ["persistence", "xgboost", "chronos2", "timestral_209m", "timesfm3"]
+BACKTEST_ISSUE_TIME = "09:00"          # UTC
+BACKTEST_HORIZON_STEPS = 156
+BACKTEST_CONTEXT_STEPS = 3 * 96
+BACKTEST_LATENCY_STEPS = 0
+BACKTEST_RESULTS_DIR = Path(__file__).resolve().parent / "results"
+BACKTEST_EVAL_WINDOW = "all"
+BACKTEST_PLOT_START = "2025-03-01"
+BACKTEST_PLOT_END = "2025-03-15"
+BACKTEST_PLOT_MODELS = None
 
 # ==========================================
-# ------------- Train/Test split config ----
+# ------------- Train/test & tuning -------
 # ==========================================
-TRAIN_START = "2024-01-04T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-TRAIN_END = "2024-12-31T00:00:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
-TEST_START = "2025-05-28T00:00:00Z"  # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-TEST_END = "2025-05-30T00:00:00Z"    # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
+TRAIN_START = "2024-01-01T00:00:00Z"
+TRAIN_END = "2024-12-31T23:45:00Z"
+TEST_START = "2025-01-01T00:00:00Z"
+TEST_END = "2025-12-31T23:45:00Z"
 
-# Cross validation (time-based, durations are pandas timedelta strings, e.g. "6h", "2D")
-CV_N_SPLITS = 3
-CV_TEST_SIZE = None                # length of each validation fold, None = train span // (n_splits + 1)
-CV_GAP = "0min"                    # time left out between train and validation fold
-CV_MAX_TRAIN_SIZE = None           # max length of the train window, None = expanding window
+CV_N_SPLITS = 5
+CV_TEST_SIZE = None
+CV_GAP = "0min"
+CV_MAX_TRAIN_SIZE = None
+
 # ==========================================
-# ------------- Data Source config ---------
+# ------------- Data sources --------------
 # ==========================================
-DATA_START = "2024-01-01T00:00:00Z"     # YYYY-MM-DDTHH:MM:SSZ, UTC, inclusive
-DATA_END = "2025-05-31T23:45:00Z"       # YYYY-MM-DDTHH:MM:SSZ, UTC, exclusive (open-meteo: end date is inclusive, the whole day is downloaded)
-
-
-# data folder
+DATA_START = "2023-12-28T00:00:00Z"
+DATA_END = "2025-12-31T23:45:00Z"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
-# ------------- Elia API -------------
 ELIA_SOURCES = {
-    # Elia data set ods031: onshore & offshore wind generation per 15min interval, in MW
     "wind": {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods031/",
-        "region": ['Flanders', 'Wallonia', 'Federal'],
+        "region": ["Flanders", "Wallonia", "Federal"],
     },
-    # Elia data set ods032: solar generation per 15min interval, in MW
     "solar": {
-            "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/",
-            "region": ['Belgium'],
-        }
+        "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/",
+        "region": ["Belgium"],
+    },
 }
-RESOLUTIONCODE = "PT15M"           # ISO 8601 duration, as used by Elia's resolutioncode
+RESOLUTIONCODE = "PT15M"
 
-# ------------- Open-Meteo API -------------
 OPENMETEO_SOURCES = {
-    # open-meteo: weather forecasts for Belgium, hourly, in UTC
     "weather": {
         "base_url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
         "latitude": 50.2581,
         "longitude": 4.9117,
-        "hourly": ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "direct_radiation", "diffuse_radiation", "direct_normal_irradiance"]
+        "hourly": [
+            "cloud_cover_low",
+            "cloud_cover_mid",
+            "cloud_cover_high",
+            "direct_radiation",
+            "diffuse_radiation",
+            "direct_normal_irradiance",
+        ],
     }
 }
-# Temporary: use local dwd weather data for wind forecast including stochastic features
 DATA_USE_DWD = True
 DATA_DWD_PATH = DATA_DIR / "dwd" / "gen_weather_dwd.parquet"
-# ==========================================
 
-LOG_LEVEL = "INFO"                 # DEBUG, INFO, WARNING, ERROR
-LOG_FILE = None                    # e.g. DATA_DIR / "logs" / "run.log"; None = console only
+LOG_LEVEL = "INFO"
+LOG_FILE = None
