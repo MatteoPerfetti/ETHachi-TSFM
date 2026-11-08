@@ -21,7 +21,7 @@ st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="
 RUNNABLE_MODELS = [
     key
     for key, value in config.MODELS_REGISTRY.items()
-    if value["type"] in ("tsfm", "traditional", "baseline")
+    if value["type"] in ("tsfm", "traditional", "baseline", "ensemble")
 ]
 WINDOW_LABELS = {"all": "All forecast steps", "d+1": "Only D+1 (next day 00:00–23:45, as Predico)"}
 SCORE_LABELS = {"RMSE": "RMSE [MW]", "Winkler80": "Winkler 80% [MW]", "RMSE_vs_persistence": "vs Persistence",
@@ -61,6 +61,10 @@ def new_backtest_form(expanded: bool) -> None:
                     "fixed_gap uses horizon-safe timestamp-wise lags. Optuna is not run here."
                 ),
             )
+            st.caption(
+                "Ensembles automatically run all traditional base models using the selected feature mode. "
+                "Their lookback, top-K, and decay defaults are defined in src/ensembles.py."
+            )
             covariates = st.multiselect("Weather covariates", list(dataset.weather.columns),
                                         default=config.TSFM_COVARIATES[config.TARGET_SOURCE])
             submitted = st.form_submit_button("Run backtest", type="primary")
@@ -89,10 +93,18 @@ def run_caption(meta: dict) -> str:
     traditional = [
         f"{model}: {values['strategy']}"
         for model, values in meta.get("model_configs", {}).items()
-        if values.get("strategy")
+        if values.get("strategy") and not values.get("ensemble_key")
     ]
     if traditional:
         caption += "  \nTraditional benchmarks: " + ", ".join(traditional)
+    ensembles = [
+        f"{model}: {values['strategy']}, bases={len(values['base_models'])}, "
+        f"parameters={values['parameters']}"
+        for model, values in meta.get("model_configs", {}).items()
+        if values.get("ensemble_key")
+    ]
+    if ensembles:
+        caption += "  \nEnsembles: " + ", ".join(ensembles)
     return caption
 
 

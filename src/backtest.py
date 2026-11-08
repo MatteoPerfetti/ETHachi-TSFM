@@ -17,6 +17,8 @@ import config
 from logger import logger
 from src.baselines import Persistence
 from src.dataset import Dataset
+from src.ensembles import DEFAULT_PARAMETERS as ENSEMBLE_PARAMETERS
+from src.ensembles import build_ensemble
 from src.forecast import STEP, Forecaster, ForecastRequest
 from src.models_traditional import load_traditional
 
@@ -118,13 +120,25 @@ def build_request(dataset: Dataset, issue: pd.Timestamp, context_steps: int, set
 
 
 def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSettings | None = None) -> BacktestResult:
-    """Fit every model on the training period, forecast every valid issue time, collect one long table."""
+    """Run requested models and post-process any requested ensembles.
+
+    Ensemble choices automatically run their configured traditional
+    dependencies with ``settings.traditional_strategy``. Dependency forecasts
+    are used internally and appear in the returned table only when the
+    corresponding individual model was also requested.
+    """
     settings = settings or BacktestSettings()
     missing = set(settings.covariates) - set(dataset.weather.columns)
     if missing:
         raise ValueError(f"covariates not in the dataset: {sorted(missing)}")
 
-    forecasters = [load_forecaster(key, settings) for key in model_keys]
+    ensemble_keys = [key for key in model_keys if key in config.ENSEMBLE_MODELS]
+    requested_base_keys = [key for key in model_keys if key not in config.ENSEMBLE_MODELS]
+    dependency_keys = config.ENSEMBLE_BASE_MODELS if ensemble_keys else []
+    run_keys = list(dict.fromkeys([*requested_base_keys, *dependency_keys]))
+
+    forecasters = [load_forecaster(key, settings) for key in run_keys]
+    forecaster_by_key = dict(zip(run_keys, forecasters))
     context_steps = {f.name: context_steps_for(f, settings) for f in forecasters}
     covariate_contexts = [context_steps[f.name] for f in forecasters if f.uses_covariates and settings.covariates]
 
@@ -147,7 +161,7 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
                 valid[0], valid[-1], [f.name for f in forecasters])
 
     train = slice(pd.Timestamp(settings.train_start), pd.Timestamp(settings.train_end) - STEP)
-    tables, timings = [], {}
+    tables, all_timings = [], {}
     for forecaster in forecasters:
         covariates = settings.covariates if forecaster.uses_covariates else None
         start = time.perf_counter()
@@ -158,19 +172,59 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
                     for issue in valid]
         start = time.perf_counter()
         results = forecaster.predict(requests)
-        timings[forecaster.name] = {"load_s": getattr(forecaster, "load_seconds", 0.0), "fit_s": fit_seconds,
-                                    "predict_s": time.perf_counter() - start}
+        all_timings[forecaster.name] = {
+            "load_s": getattr(forecaster, "load_seconds", 0.0),
+            "fit_s": fit_seconds,
+            "predict_s": time.perf_counter() - start,
+        }
         tables += [result.to_long() for result in results]
         logger.info("%s done: %d forecasts, timings %s", forecaster.name, len(results),
-                    {k: round(v, 1) for k, v in timings[forecaster.name].items()})
+                    {k: round(v, 1) for k, v in all_timings[forecaster.name].items()})
 
-    predictions = pd.concat(tables, ignore_index=True)
-    predictions.insert(2, "lead_step", ((predictions["timestamp"] - predictions["issue_time"]) / STEP).astype(int))
-    predictions["actual"] = dataset.target.reindex(predictions["timestamp"]).to_numpy()
+    base_predictions = pd.concat(tables, ignore_index=True)
+    base_predictions.insert(
+        2,
+        "lead_step",
+        ((base_predictions["timestamp"] - base_predictions["issue_time"]) / STEP).astype(int),
+    )
+    base_predictions["actual"] = dataset.target.reindex(base_predictions["timestamp"]).to_numpy()
+
+    requested_names = [forecaster_by_key[key].name for key in requested_base_keys]
+    output_tables = [base_predictions[base_predictions["model"].isin(requested_names)]] if requested_names else []
+    timings = {name: all_timings[name] for name in requested_names}
     model_configs = {
-        forecaster.name: getattr(forecaster, "configuration", {})
-        for forecaster in forecasters
+        name: getattr(forecaster_by_key[key], "configuration", {})
+        for key, name in zip(requested_base_keys, requested_names)
     }
+
+    ensemble_base_names = (
+        [forecaster_by_key[key].name for key in config.ENSEMBLE_BASE_MODELS]
+        if ensemble_keys
+        else []
+    )
+    for ensemble_key in ensemble_keys:
+        start = time.perf_counter()
+        ensemble = build_ensemble(
+            ensemble_key=ensemble_key,
+            predictions=base_predictions,
+            models=ensemble_base_names,
+            strategy=settings.traditional_strategy,
+            latency_steps=settings.latency_steps,
+        )
+        elapsed = time.perf_counter() - start
+        ensemble_name = ensemble.predictions["model"].iloc[0]
+        output_tables.append(ensemble.predictions)
+        timings[ensemble_name] = {"load_s": 0.0, "fit_s": 0.0, "predict_s": elapsed}
+        model_configs[ensemble_name] = {
+            "ensemble_key": ensemble_key,
+            "base_models": ensemble_base_names,
+            "strategy": settings.traditional_strategy,
+            "parameters": ENSEMBLE_PARAMETERS[ensemble_key],
+        }
+        logger.info("%s done: %d forecasts in %.2fs", ensemble_name,
+                    ensemble.predictions["issue_time"].nunique(), elapsed)
+
+    predictions = pd.concat(output_tables, ignore_index=True)
     return BacktestResult(
         settings=settings,
         predictions=predictions,

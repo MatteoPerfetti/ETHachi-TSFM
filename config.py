@@ -16,6 +16,8 @@ MODELS_REGISTRY = {
     "catboost": {"type": "traditional", "name": "CatBoost"},
     "ngboost": {"type": "traditional", "name": "NGBoost"},
     "tabnet": {"type": "traditional", "name": "TabNet"},
+    "equal_mean": {"type": "ensemble", "name": "Equal mean ensemble"},
+    "top_k_exponential": {"type": "ensemble", "name": "Top-K exponential ensemble"},
     "chronos2": {
         "type": "tsfm",
         "checkpoint": "amazon/chronos-2",
@@ -34,6 +36,7 @@ MODELS_REGISTRY = {
 }
 TRADITIONAL_MODELS = [key for key, value in MODELS_REGISTRY.items() if value["type"] == "traditional"]
 TSFM_MODELS = [key for key, value in MODELS_REGISTRY.items() if value["type"] == "tsfm"]
+ENSEMBLE_MODELS = [key for key, value in MODELS_REGISTRY.items() if value["type"] == "ensemble"]
 
 # Dashboard runs use configured/default parameters. Optuna remains available
 # as an offline workflow in src/MLtrad.py and is never started by app.py.
@@ -49,6 +52,11 @@ TRADITIONAL_MODEL_PARAMETERS = {
     "tabnet": {},
 }
 OPTUNA_N_TRIALS = 10
+
+# Ensembles are dashboard model choices whose dependencies are run
+# automatically. Their lookback/top-K/decay settings live in src/ensembles.py.
+# Every traditional dependency uses the feature mode selected in the dashboard.
+ENSEMBLE_BASE_MODELS = list(TRADITIONAL_MODELS)
 
 # ==========================================
 # ------------- Forecast config -----------
