@@ -174,7 +174,7 @@ OPENMETEO_SOURCES = {
 DATA_USE_DWD = True                    # required for the wind TSFM_COVARIATES
 DATA_DWD_PATH = DATA_DIR / "dwd" / "gen_weather_dwd.parquet"
 # PV data sample points
-DATA_PV_REGIONS_BOOL = True
+DATA_PV_REGIONS_BOOL = False            # True: use the PV sample points for the solar TSFM_COVARIATES, False: use the open-meteo weather data
 DATA_PV_REGIONS = ["Flemish-Brabant", "West-Flanders", "East-Flanders", "Limburg", "Liège", "Namur", "Brussels", "Hainaut", "Walloon-Brabant", "Antwerp", "Luxembourg"]
 # -- redundant with ELIA_SOURCES["solar"]["regions"]
 
