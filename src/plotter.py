@@ -75,7 +75,7 @@ def plot_backtest(predictions: pd.DataFrame, run_name: str,
 
         ax.set_title(f"{model}   ·   RMSE D+1 in this window {errors[model]:,.0f} MW", loc="left",
                      color=TEXT_PRIMARY, fontsize=11)
-        ax.set_ylabel("MW", color=TEXT_SECONDARY)
+        ax.set_ylabel("Power [MW]", color=TEXT_SECONDARY)
         ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8)
         ax.tick_params(colors=TEXT_MUTED, labelsize=9)
         for side in ("top", "right", "left"):
@@ -87,6 +87,7 @@ def plot_backtest(predictions: pd.DataFrame, run_name: str,
 
     days = (end_ts - start_ts).days
     locator = mdates.DayLocator(interval=max(1, days // 8))
+    axes[-1, 0].set_xlabel("Time [UTC]", color=TEXT_SECONDARY)
     axes[-1, 0].xaxis.set_major_locator(locator)
     axes[-1, 0].xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
     regions = "+".join(config.ELIA_SOURCES[config.TARGET_SOURCE]["region"])
@@ -107,7 +108,7 @@ def plot_backtest(predictions: pd.DataFrame, run_name: str,
 
 
 # ------------- Interactive (Plotly) versions, used by the dashboard (app.py) -------------
-def _plotly_layout(fig: go.Figure, title: str, y_title: str = "MW") -> go.Figure:
+def _plotly_layout(fig: go.Figure, title: str, y_title: str = "Power [MW]", x_title: str = "Time [UTC]") -> go.Figure:
     fig.update_layout(
         title=dict(text=title, x=0.01, font=dict(color=TEXT_PRIMARY, size=15)),
         template="plotly_white", paper_bgcolor=SURFACE, plot_bgcolor=SURFACE, hovermode="x unified",
@@ -116,9 +117,9 @@ def _plotly_layout(fig: go.Figure, title: str, y_title: str = "MW") -> go.Figure
         legend=dict(title=dict(text="Model", font=dict(color=TEXT_SECONDARY)), orientation="v",
                     x=1.01, xanchor="left", y=1, yanchor="top", itemwidth=40,
                     font=dict(color=TEXT_PRIMARY, size=13), bgcolor="rgba(0,0,0,0)"),
-        margin=dict(l=60, r=20, t=60, b=40), height=520,
+        margin=dict(l=60, r=20, t=60, b=60), height=520,
         yaxis=dict(title=y_title, gridcolor=GRID_COLOR, zeroline=False),
-        xaxis=dict(showgrid=False, linecolor=AXIS_COLOR),
+        xaxis=dict(title=x_title, showgrid=False, linecolor=AXIS_COLOR),
     )
     return fig
 
@@ -190,37 +191,49 @@ def plotly_daily_scores(daily: pd.DataFrame, metric: str, models: list[str]) -> 
         fig.add_trace(go.Scatter(x=d["issue_time"], y=d[metric], mode="lines", name=model,
                                  line=dict(color=colors[model], width=1.6),
                                  hovertemplate=f"{model}: %{{y:,.0f}} MW<extra></extra>"))
-    return _plotly_layout(fig, f"Daily {metric} per forecast (issue day on the x axis)", y_title=f"{metric} [MW]")
+    return _plotly_layout(fig, f"Daily {metric} per forecast (issue day on the x axis)", y_title=f"{metric} [MW]",
+                          x_title="Issue day [UTC]")
 
 # ------------- Feature selection plots -------------------
 ACTUAL_COLOR = "#2a78d6"
 PREDICTED_COLOR = "#eb6834"
-def plot_tree_importance(importance: pd.DataFrame, curve: pd.DataFrame, n_selected: int, top_n: int,
+def plot_tree_importance(importance: pd.DataFrame, curve: pd.DataFrame, n_selected: int | None, top_n: int,
                          filename: str = f"tree_{config.TARGET_SOURCE}_feature_importance.png", show: bool = False,
                          size_col: str = "n_features", unit: str = "features") -> plt.Figure:
     """Left: permutation importance (mean ± std over folds) of the top_n features, selected ones highlighted.
 
     Right: CV RMSE of the top-k features against k (curve[size_col]), with the selected k marked.
+    n_selected=None draws no selection (all bars in one color, no marker).
     Expects the outputs of tree_feature_importance and cv_rmse_by_subset_size, or of tree_group_importance and
     cv_rmse_by_group_count with size_col="n_groups", unit="groups".
     The figure is saved to PLOT_DIRECTORY / filename.
     """
     shown = importance.head(top_n).iloc[::-1]
-    colors = [ACTUAL_COLOR if rank <= n_selected else GRID_COLOR for rank in shown["rank"]]
+    colors = [ACTUAL_COLOR if n_selected is None or rank <= n_selected else GRID_COLOR for rank in shown["rank"]]
 
     fig, (ax_bar, ax_curve) = plt.subplots(1, 2, figsize=(15, max(5, 0.25 * len(shown))), facecolor=SURFACE,
                                            gridspec_kw={"width_ratios": [3, 2]})
-    ax_bar.barh(shown.index, shown["permutation_mean"], xerr=shown["permutation_std"], color=colors,
+    names = shown.index
+    ax_bar.barh(names, shown["permutation_mean"], xerr=shown["permutation_std"], color=colors,
                 error_kw={"ecolor": TEXT_SECONDARY, "linewidth": 0.8})
-    ax_bar.set_title(f"Permutation importance (top {len(shown)} {unit}, {n_selected} selected)",
+    selected_note = "" if n_selected is None else f", {n_selected} selected"
+    ax_bar.set_title(f"Permutation importance (top {len(shown)} {unit}{selected_note})",
                      loc="left", color=TEXT_PRIMARY, fontsize=11)
     ax_bar.set_xlabel("RMSE increase when shuffled (MW)", color=TEXT_SECONDARY)
     ax_bar.tick_params(axis="y", labelsize=8)
     ax_bar.grid(axis="x", color=GRID_COLOR, linewidth=0.8)
+    handles = [plt.Line2D([], [], color=TEXT_SECONDARY, linewidth=0.8, marker="|", label="± 1 std over CV folds")]
+    if n_selected is not None:
+        handles = [plt.Rectangle((0, 0), 1, 1, color=ACTUAL_COLOR, label="Selected"),
+                   plt.Rectangle((0, 0), 1, 1, color=GRID_COLOR, label="Not selected")] + handles
+    ax_bar.legend(handles=handles, loc="lower right", frameon=False, labelcolor=TEXT_SECONDARY)
 
     ax_curve.errorbar(curve[size_col], curve["cv_rmse"], yerr=curve["cv_rmse_std"], color=PREDICTED_COLOR,
                       linewidth=2, marker="o", markersize=4, ecolor=GRID_COLOR, capsize=3)
-    ax_curve.axvline(n_selected, color=ACTUAL_COLOR, linestyle="--", linewidth=1.5, label=f"Selected: {n_selected}")
+    full_rmse = curve.loc[curve[size_col].idxmax(), "cv_rmse"]
+    ax_curve.axhline(full_rmse, color=TEXT_SECONDARY, linestyle=":", linewidth=1.2, label=f"All {unit}: {full_rmse:.2f} MW")
+    if n_selected is not None:
+        ax_curve.axvline(n_selected, color=ACTUAL_COLOR, linestyle="--", linewidth=1.5, label=f"Selected: {n_selected}")
     ax_curve.set_title(f"CV RMSE of the top-k {unit}", loc="left", color=TEXT_PRIMARY, fontsize=11)
     ax_curve.set_xlabel(f"Number of {unit} (k)", color=TEXT_SECONDARY)
     ax_curve.set_ylabel("CV RMSE (MW)", color=TEXT_SECONDARY)

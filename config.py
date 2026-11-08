@@ -167,14 +167,14 @@ OPENMETEO_SOURCES = {
         "base_url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
         "latitude": 50.2581,
         "longitude": 4.9117,
-        "hourly": ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "direct_radiation", "diffuse_radiation", "direct_normal_irradiance"]
+        "hourly": ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high", "direct_radiation", "diffuse_radiation"]
     }
 }
 # Temporary: use local dwd weather data for wind forecast including stochastic features
 DATA_USE_DWD = True                    # required for the wind TSFM_COVARIATES
 DATA_DWD_PATH = DATA_DIR / "dwd" / "gen_weather_dwd.parquet"
 # PV data sample points
-DATA_PV_REGIONS_BOOL = False
+DATA_PV_REGIONS_BOOL = True
 DATA_PV_REGIONS = ["Flemish-Brabant", "West-Flanders", "East-Flanders", "Limburg", "Liège", "Namur", "Brussels", "Hainaut", "Walloon-Brabant", "Antwerp", "Luxembourg"]
 # -- redundant with ELIA_SOURCES["solar"]["regions"]
 
@@ -183,7 +183,8 @@ DATA_PV_PRODUCTION_YEAR = 2025
 DATA_PV_WEATHER_SAMPLES = 200
 DATA_PV_RANDOM_SEED = 42
 # statistics that summarize all PV weather sample points per timestep and variable (pandas aggregation names)
-STATISTICAL_PROPERTIES = ["mean", "std", "min", "max", "skew", "kurt"]
+STATISTICAL_PROPERTIES = ["mean", "std", "min", "max"]
+# STATISTICAL_PROPERTIES = ["mean", "std", "min", "max", "skew", "kurt"]
 # Elia region -> NUTS 2 code, polygons from Nuts2json (2024 NUTS, WGS84 lon/lat, 1:10M)
 DATA_PV_NUTS = {
     "Brussels": "BE10",

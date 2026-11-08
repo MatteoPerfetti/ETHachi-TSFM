@@ -12,8 +12,7 @@ import streamlit as st
 import config
 from src.backtest import BacktestSettings, load_backtest, run_backtest, save_backtest, saved_runs
 from src.dataset import load_dataset
-from src.feature_selection import (load_selection, run_tree_selection, save_selection, select_smallest_subset,
-                                   tsfm_covariates)
+from src.feature_selection import load_selection, run_tree_selection, save_selection, tsfm_covariates
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
 from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
 from src.validate_config import validate_config
@@ -35,25 +34,22 @@ def get_dataset(target_source: str = config.TARGET_SOURCE):
 def feature_selection_section() -> None:
     """Feature selection for the TSFM covariates: settings first in the sidebar, one tab per target source."""
     modes = config.TREE_SELECTION_MODES
-    with st.sidebar.expander("Feature selection", expanded=False):
+    with st.sidebar.expander("Feature selection - Random Forest Tree", expanded=False):
         mode = st.radio("Rank", list(modes), format_func=lambda m: modes[m][2],
                         index=list(modes).index("groups" if config.TREE_GROUP_SELECTION_BOOL else "features"))
         lags = st.checkbox("Target lags as candidates", value=config.TREE_SELECTION_LAGS)
         calendar = st.checkbox("Calendar dummies as candidates", value=config.TREE_SELECTION_CALENDAR)
-        tolerance = st.slider("Tolerance vs all candidates [%]", 0.0, 10.0,
-                              config.TREE_SELECTION_TOLERANCE * 100, 0.5) / 100
         top_n = st.number_input("Bars shown", min_value=5, max_value=200, value=config.TREE_SELECTION_TOP_N_PLOT)
-        st.caption("Lags and calendar dummies only compete in the ranking, they are never recommended as TSFM "
-                   "covariates: the TSFMs build them from the context.")
+        st.caption("Note: Weather covariates are included by default")
     with st.expander("🔎 Feature selection for the TSFM covariates", expanded=False):
         sources = list(config.ELIA_SOURCES)
         for tab, source in zip(st.tabs([s.capitalize() for s in sources]), sources):
             with tab:
-                selection_tab(source, mode, lags, calendar, tolerance, int(top_n))
+                selection_tab(source, mode, lags, calendar, int(top_n))
 
 
-def selection_tab(source: str, mode: str, lags: bool, calendar: bool, tolerance: float, top_n: int) -> None:
-    """Run (or re-run) the selection of one target, then show its graph and the recommended TSFM covariates."""
+def selection_tab(source: str, mode: str, lags: bool, calendar: bool, top_n: int) -> None:
+    """Run (or re-run) the selection of one target, then show its graph and a table to pick the TSFM covariates."""
     if st.button(f"Run feature selection for {source}", key=f"selection_{source}"):
         dataset = get_dataset(source)
         with st.spinner(f"Ranking the features of {source} on the training period..."):
@@ -65,21 +61,30 @@ def selection_tab(source: str, mode: str, lags: bool, calendar: bool, tolerance:
         return
 
     size_col, unit, _ = config.TREE_SELECTION_MODES[mode]
-    selected = select_smallest_subset(result.curve, result.importance.index, tolerance, size_col)
-    fig = plot_tree_importance(result.importance, result.curve, len(selected), top_n,
+    fig = plot_tree_importance(result.importance, result.curve, None, top_n,
                                filename=f"tree_{source}_{mode}_importance.png", size_col=size_col, unit=unit)
     st.pyplot(fig)
     plt.close(fig)
 
-    covariates = tsfm_covariates(result, selected)
+    top = result.importance.head(top_n)
     current = config.TSFM_COVARIATES.get(source, [])
-    shown = list(dict.fromkeys(covariates + current))
-    st.dataframe(pd.DataFrame({"recommended": [c in covariates for c in shown],
-                               "in config.py": [c in current for c in shown]},
-                              index=pd.Index(shown, name="covariate")), width="content")
+    in_config = [bool(set(tsfm_covariates(result, [name])) & set(current)) for name in top.index]
+    table = pd.DataFrame({"select": False, "importance [MW]": top["permutation_mean"].round(3), "in config.py": in_config},
+                         index=top.index.rename(unit[:-1]))
+    if "statistics" in top:
+        table.insert(1, "statistics", top["statistics"].fillna(""))
+    edited = st.data_editor(table, disabled=[c for c in table.columns if c != "select"], width="content",
+                            key=f"covariate_table_{source}_{mode}_{lags}_{calendar}")
+    covariates = tsfm_covariates(result, list(edited.index[edited["select"]]))
     st.code(f'"{source}": {covariates},', language="python")
-    st.caption(f"Weather columns of the smallest top-k {unit} with CV RMSE within {tolerance:.1%} of all candidates "
-               "(lags and calendar dummies left out). Paste into TSFM_COVARIATES in config.py.")
+    st.caption(f"Tick the {unit} to use: their weather columns are added to the list above (lags and calendar dummies "
+               "are left out). Paste it into TSFM_COVARIATES in config.py, or run a backtest: the form in the sidebar "
+               "takes the ticked covariates of the target source as its default.")
+    ticked = st.session_state.setdefault("ticked_covariates", {})
+    if covariates:
+        ticked[source] = covariates
+    else:
+        ticked.pop(source, None)
 
 
 @st.cache_data(show_spinner="Loading backtest results...")
@@ -91,7 +96,10 @@ def get_run(run_name: str, modified: float) -> pd.DataFrame:
 def new_backtest_form(expanded: bool) -> None:
     """Sidebar form: run a backtest with the chosen models, context, horizon, latency and covariates, then save it."""
     with st.sidebar.expander("Run a new backtest", expanded=expanded):
-        dataset = get_dataset()
+        # outside the form: changing the target reloads the dataset and the covariate options right away
+        sources = list(config.ELIA_SOURCES)
+        target = st.selectbox("Target source", sources, index=sources.index(config.TARGET_SOURCE))
+        dataset = get_dataset(target)
         with st.form("new_backtest"):
             models = st.multiselect("Models", RUNNABLE_MODELS,
                                     default=[m for m in config.BACKTEST_MODELS if m in RUNNABLE_MODELS])
@@ -101,8 +109,11 @@ def new_backtest_form(expanded: bool) -> None:
                                       value=config.BACKTEST_HORIZON_STEPS)
             latency = st.number_input("Data latency [steps]", min_value=0, max_value=96,
                                       value=config.BACKTEST_LATENCY_STEPS)
-            covariates = st.multiselect("Weather covariates (TSFMs)", list(dataset.weather.columns),
-                                        default=config.TSFM_COVARIATES[config.TARGET_SOURCE])
+            # default: the covariates ticked in the feature selection table, else the ones from config.py
+            default = st.session_state.get("ticked_covariates", {}).get(target, config.TSFM_COVARIATES.get(target, []))
+            covariates = st.multiselect("Weather covariates (TSFMs) - selection", list(dataset.weather.columns),
+                                        default=[c for c in default if c in dataset.weather.columns],
+                                        key=f"covariates_{target}")
             submitted = st.form_submit_button("Run backtest", type="primary")
         st.caption("A full year takes minutes per TSFM on CPU. Re-running a model with the same settings "
                    "replaces only its forecasts in the saved run.")
@@ -111,7 +122,7 @@ def new_backtest_form(expanded: bool) -> None:
             st.sidebar.error("Choose at least one model.")
             return
         settings = BacktestSettings(context_steps=int(context), horizon_steps=int(horizon),
-                                    latency_steps=int(latency), covariates=covariates)
+                                    latency_steps=int(latency), covariates=covariates, target_source=target)
         with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
             save_backtest(run_backtest(dataset, models, settings))
         st.session_state["run"] = settings.run_name
