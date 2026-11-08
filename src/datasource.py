@@ -5,6 +5,9 @@ import time
 
 import pandas as pd
 import numpy as np
+from shapely import contains_xy
+from shapely.geometry import shape
+from shapely.geometry.base import BaseGeometry
 
 from config import (DATA_DIR, SOLAR_REGION_DIR, DATA_PV_NUTS, DATA_PV_PRODUCTION_YEAR, DATA_PV_RANDOM_SEED, DATA_PV_REGIONS,
                     DATA_PV_WEATHER_SAMPLES, RESOLUTIONCODE, STATISTICAL_PROPERTIES)

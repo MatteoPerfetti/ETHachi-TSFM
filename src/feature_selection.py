@@ -154,12 +154,16 @@ def tree_group_importance(X_train: pd.DataFrame, y_train: pd.DataFrame, groups: 
         permutation[i] = _grouped_permutation_importance(model, X_val, y_val, groups, n_repeats, rng)
         impurity[i] = pd.Series(model.feature_importances_, index=X_train.columns).groupby(groups).sum()
 
+    suffixes = pd.Series(groups.index.str.rpartition("_").get_level_values(2), index=groups.index)
+    is_statistic = suffixes.isin(config.STATISTICAL_PROPERTIES) & (groups != groups.index)
+
     permutation = pd.DataFrame(permutation)
     importance = pd.DataFrame({
         "permutation_mean": permutation.mean(axis=1),
         "permutation_std": permutation.std(axis=1),
         "impurity_sum": pd.DataFrame(impurity).mean(axis=1),
         "n_features": groups.value_counts(),
+        "statistics": suffixes[is_statistic].groupby(groups[is_statistic]).agg(", ".join),
     }).sort_values("permutation_mean", ascending=False)
     importance["rank"] = np.arange(1, len(importance) + 1)
     return importance
