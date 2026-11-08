@@ -5,14 +5,17 @@
 Saved runs are read from results/ (written by main.py or by the form in the sidebar), nothing is recomputed
 to look at them. Defaults come from config.py.
 """
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
 import config
 from src.backtest import BacktestSettings, load_backtest, run_backtest, save_backtest, saved_runs
 from src.dataset import load_dataset
+from src.feature_selection import (load_selection, run_tree_selection, save_selection, select_smallest_subset,
+                                   tsfm_covariates)
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
-from src.plotter import plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
+from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
 from src.validate_config import validate_config
 
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
@@ -25,8 +28,58 @@ SCORE_LABELS = {"RMSE": "RMSE [MW]", "Winkler80": "Winkler 80% [MW]", "RMSE_vs_p
 
 
 @st.cache_resource(show_spinner="Loading dataset...")
-def get_dataset():
-    return load_dataset()
+def get_dataset(target_source: str = config.TARGET_SOURCE):
+    return load_dataset(target_source)
+
+
+def feature_selection_section() -> None:
+    """Feature selection for the TSFM covariates: settings first in the sidebar, one tab per target source."""
+    modes = config.TREE_SELECTION_MODES
+    with st.sidebar.expander("Feature selection", expanded=False):
+        mode = st.radio("Rank", list(modes), format_func=lambda m: modes[m][2],
+                        index=list(modes).index("groups" if config.TREE_GROUP_SELECTION_BOOL else "features"))
+        lags = st.checkbox("Target lags as candidates", value=config.TREE_SELECTION_LAGS)
+        calendar = st.checkbox("Calendar dummies as candidates", value=config.TREE_SELECTION_CALENDAR)
+        tolerance = st.slider("Tolerance vs all candidates [%]", 0.0, 10.0,
+                              config.TREE_SELECTION_TOLERANCE * 100, 0.5) / 100
+        top_n = st.number_input("Bars shown", min_value=5, max_value=200, value=config.TREE_SELECTION_TOP_N_PLOT)
+        st.caption("Lags and calendar dummies only compete in the ranking, they are never recommended as TSFM "
+                   "covariates: the TSFMs build them from the context.")
+    with st.expander("🔎 Feature selection for the TSFM covariates", expanded=False):
+        sources = list(config.ELIA_SOURCES)
+        for tab, source in zip(st.tabs([s.capitalize() for s in sources]), sources):
+            with tab:
+                selection_tab(source, mode, lags, calendar, tolerance, int(top_n))
+
+
+def selection_tab(source: str, mode: str, lags: bool, calendar: bool, tolerance: float, top_n: int) -> None:
+    """Run (or re-run) the selection of one target, then show its graph and the recommended TSFM covariates."""
+    if st.button(f"Run feature selection for {source}", key=f"selection_{source}"):
+        dataset = get_dataset(source)
+        with st.spinner(f"Ranking the features of {source} on the training period..."):
+            save_selection(run_tree_selection(source, dataset.target, dataset.weather, mode, lags, calendar))
+    result = load_selection(source, mode, lags, calendar)
+    if result is None:
+        st.info("No saved selection for these settings yet: run it with the button. RandomForest fits on the "
+                f"training period {config.TRAIN_START[:10]} – {config.TRAIN_END[:10]}, takes minutes.")
+        return
+
+    size_col, unit, _ = config.TREE_SELECTION_MODES[mode]
+    selected = select_smallest_subset(result.curve, result.importance.index, tolerance, size_col)
+    fig = plot_tree_importance(result.importance, result.curve, len(selected), top_n,
+                               filename=f"tree_{source}_{mode}_importance.png", size_col=size_col, unit=unit)
+    st.pyplot(fig)
+    plt.close(fig)
+
+    covariates = tsfm_covariates(result, selected)
+    current = config.TSFM_COVARIATES.get(source, [])
+    shown = list(dict.fromkeys(covariates + current))
+    st.dataframe(pd.DataFrame({"recommended": [c in covariates for c in shown],
+                               "in config.py": [c in current for c in shown]},
+                              index=pd.Index(shown, name="covariate")), width="content")
+    st.code(f'"{source}": {covariates},', language="python")
+    st.caption(f"Weather columns of the smallest top-k {unit} with CV RMSE within {tolerance:.1%} of all candidates "
+               "(lags and calendar dummies left out). Paste into TSFM_COVARIATES in config.py.")
 
 
 @st.cache_data(show_spinner="Loading backtest results...")
@@ -129,6 +182,7 @@ def single_tab(predictions: pd.DataFrame, models: list[str], window: str, bands:
 def main() -> None:
     validate_config()
     st.title("⚡ ETHachi-TSFM backtest")
+    feature_selection_section()
 
     runs = saved_runs()
     new_backtest_form(expanded=not runs)

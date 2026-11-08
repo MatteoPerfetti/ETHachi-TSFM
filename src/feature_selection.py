@@ -1,4 +1,7 @@
+import json
 import re
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -6,9 +9,12 @@ from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import root_mean_squared_error
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import RobustScaler
 
+import config
 from logger import logger
+from src.features import add_calendar_features, add_lag_features
 
 # ==========================================
 # ------------- Tree-based selection -------
@@ -168,3 +174,111 @@ def cv_rmse_by_group_count(X_train: pd.DataFrame, y_train: pd.DataFrame, groups:
         rows.append({"n_groups": k, "n_features": len(columns), **_cv_rmse(X_train, y_train, columns, folds, rf_params)})
         logger.info("Top %d groups (%d features): CV RMSE %.2f", k, len(columns), rows[-1]["cv_rmse"])
     return pd.DataFrame(rows)
+
+
+# ==========================================
+# ------------- Selection run for the TSFM covariates (dashboard)
+@dataclass
+class SelectionResult:
+    """Ranking of the candidate features of one target, with the CV RMSE curve of the top-k."""
+    target_source: str
+    mode: str                    # "features" or "groups"
+    lags: bool                   # target lags were candidates
+    calendar: bool               # calendar dummies were candidates
+    importance: pd.DataFrame
+    curve: pd.DataFrame
+    columns: list[str]           # every candidate column
+    weather_columns: list[str]   # the candidates that can be TSFM covariates
+
+
+def selection_features(target: pd.Series, weather: pd.DataFrame, lags: bool, calendar: bool) -> pd.DataFrame:
+    """Candidate features: the weather columns, plus optionally lags of the target and calendar dummies.
+
+    Lags run from PREDICTION_LENGTH to PREDICTION_LENGTH + CONTEXT_LENGTH - 1 steps back (add_lag_features), so they
+    are known at forecast time. Lags and calendar dummies only compete in the ranking, they are never TSFM covariates:
+    the TSFMs get the target history as context and build such features internally.
+    """
+    X = weather
+    if lags:
+        X = X.join(add_lag_features(target.to_frame(), config.CONTEXT_LENGTH, config.PREDICTION_LENGTH))
+    if calendar:
+        X = add_calendar_features(X, config.TIMEZONE, config.COUNTRY)
+    return X
+
+
+def time_folds(X: pd.DataFrame, n_splits: int = config.CV_N_SPLITS, test_size: str | None = config.CV_TEST_SIZE,
+               gap: str = config.CV_GAP, max_train_size: str | None = config.CV_MAX_TRAIN_SIZE
+               ) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """Time-ordered (X_fit, X_val) folds from the CV_* settings; durations are converted to rows of X's median step."""
+    step = X.index.to_series().diff().median()
+
+    def rows(duration: str | None) -> int | None:
+        return None if duration is None else int(pd.Timedelta(duration) / step)
+
+    splitter = TimeSeriesSplit(n_splits=n_splits, test_size=rows(test_size), gap=rows(gap),
+                               max_train_size=rows(max_train_size))
+    return [(X.iloc[fit], X.iloc[val]) for fit, val in splitter.split(X)]
+
+
+def run_tree_selection(target_source: str, target: pd.Series, weather: pd.DataFrame, mode: str,
+                       lags: bool, calendar: bool) -> SelectionResult:
+    """Rank the candidate features of `target` on the training period (TRAIN_START..TRAIN_END, rows with gaps dropped).
+
+    mode "features" ranks single columns (curve over TREE_SELECTION_SUBSET_SIZES), "groups" ranks feature_groups
+    (curve over every group count).
+    """
+    X = selection_features(target, weather, lags, calendar)
+    train = slice(pd.Timestamp(config.TRAIN_START), pd.Timestamp(config.TRAIN_END) - pd.Timedelta(config.RESOLUTIONCODE))
+    data = X.join(target).loc[train].dropna()
+    X, y = data[X.columns], data[[target.name]]
+    folds = time_folds(X)
+    params, repeats = config.TREE_SELECTION_RF_PARAMS, config.TREE_SELECTION_N_REPEATS
+    logger.info("Feature selection %s (%s): %d rows, %d candidates", target_source, mode, len(X), X.shape[1])
+    if mode == "groups":
+        groups = feature_groups(X.columns, config.STATISTICAL_PROPERTIES, config.TREE_GROUP_LAG_BLOCK)
+        importance = tree_group_importance(X, y, groups, folds, params, repeats)
+        curve = cv_rmse_by_group_count(X, y, groups, importance.index, folds, params)
+    else:
+        importance = tree_feature_importance(X, y, folds, params, repeats)
+        curve = cv_rmse_by_subset_size(X, y, importance.index, folds, params, config.TREE_SELECTION_SUBSET_SIZES)
+    return SelectionResult(target_source, mode, lags, calendar, importance, curve,
+                           list(X.columns), list(weather.columns))
+
+
+def tsfm_covariates(result: SelectionResult, selected: list[str]) -> list[str]:
+    """Weather columns of the selected features or groups, in rank order; lags and calendar dummies are left out."""
+    if result.mode == "groups":
+        groups = feature_groups(pd.Index(result.columns), config.STATISTICAL_PROPERTIES, config.TREE_GROUP_LAG_BLOCK)
+        selected = [col for group in selected for col in groups.index[groups == group]]
+    return [col for col in selected if col in result.weather_columns]
+
+
+def _selection_stem(target_source: str, mode: str, lags: bool, calendar: bool) -> Path:
+    """e.g. results/feature_selection/wind_groups_lags_calendar"""
+    extras = "".join(name for name, on in (("_lags", lags), ("_calendar", calendar)) if on)
+    return config.TREE_SELECTION_DIR / f"{target_source}_{mode}{extras}"
+
+
+def save_selection(result: SelectionResult) -> Path:
+    """Write <stem>_importance.parquet, <stem>_curve.parquet and <stem>.json (candidate columns, training period)."""
+    stem = _selection_stem(result.target_source, result.mode, result.lags, result.calendar)
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    result.importance.to_parquet(stem.with_name(f"{stem.name}_importance.parquet"))
+    result.curve.to_parquet(stem.with_name(f"{stem.name}_curve.parquet"))
+    meta = {"columns": result.columns, "weather_columns": result.weather_columns,
+            "train": [config.TRAIN_START, config.TRAIN_END]}
+    stem.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    logger.info("Feature selection saved to %s", stem)
+    return stem
+
+
+def load_selection(target_source: str, mode: str, lags: bool, calendar: bool) -> SelectionResult | None:
+    """Read back a saved selection, None if it was not run with these settings yet."""
+    stem = _selection_stem(target_source, mode, lags, calendar)
+    if not stem.with_suffix(".json").exists():
+        return None
+    meta = json.loads(stem.with_suffix(".json").read_text(encoding="utf-8"))
+    return SelectionResult(target_source, mode, lags, calendar,
+                           pd.read_parquet(stem.with_name(f"{stem.name}_importance.parquet")),
+                           pd.read_parquet(stem.with_name(f"{stem.name}_curve.parquet")),
+                           meta["columns"], meta["weather_columns"])

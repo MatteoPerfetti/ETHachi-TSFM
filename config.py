@@ -36,8 +36,6 @@ MODELS_REGISTRY = {
 }
 TRADITIONAL_MODELS = [k for k, v in MODELS_REGISTRY.items() if v["type"] == "traditional"]
 RUN_TRADITIONAL_MODELS = False         # False: main.py skips the traditional models (XGBoost silenced while being reworked)
-TSFM_MODELS = [k for k, v in MODELS_REGISTRY.items() if v["type"] == "tsfm"]
-MODEL_TYPE = "xgboost"                 # "xgboost"
 
 # ==========================================
 # ------------- Forecast config ----
@@ -130,6 +128,13 @@ TREE_SELECTION_TOLERANCE = 0.01        # select the smallest top-k with CV RMSE 
 TREE_SELECTION_TOP_N_PLOT = 30         # number of features shown in the importance plot
 TREE_GROUP_SELECTION_BOOL = True       # True: same selection on feature groups (weather variable, lag block, calendar dummy)
 TREE_GROUP_LAG_BLOCK = 12              # consecutive lags per group (24 steps = 6 h at 15 min)
+TREE_SELECTION_DIR = BACKTEST_RESULTS_DIR / "feature_selection"  # saved rankings shown in the dashboard
+TREE_SELECTION_MODES = {               # mode -> (curve size column, unit, dashboard label)
+    "groups": ("n_groups", "groups", "Feature groups"),
+    "features": ("n_features", "features", "Single features"),
+}
+TREE_SELECTION_LAGS = False            # default: target lags as candidates (ranked only, never TSFM covariates)
+TREE_SELECTION_CALENDAR = False        # default: calendar dummies as candidates (ranked only, never TSFM covariates)
 # ==========================================
 # ------------- Data Source config ---------
 # ==========================================

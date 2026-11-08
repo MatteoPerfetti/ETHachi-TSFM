@@ -203,7 +203,7 @@ def plot_tree_importance(importance: pd.DataFrame, curve: pd.DataFrame, n_select
     Right: CV RMSE of the top-k features against k (curve[size_col]), with the selected k marked.
     Expects the outputs of tree_feature_importance and cv_rmse_by_subset_size, or of tree_group_importance and
     cv_rmse_by_group_count with size_col="n_groups", unit="groups".
-    The figure is saved to PCA_PLOT_DIR / filename.
+    The figure is saved to PLOT_DIRECTORY / filename.
     """
     shown = importance.head(top_n).iloc[::-1]
     colors = [ACTUAL_COLOR if rank <= n_selected else GRID_COLOR for rank in shown["rank"]]
@@ -235,8 +235,8 @@ def plot_tree_importance(importance: pd.DataFrame, curve: pd.DataFrame, n_select
         ax.spines["bottom"].set_color(GRID_COLOR)
     fig.tight_layout()
 
-    config.PCA_PLOT_DIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(config.PCA_PLOT_DIR / filename, dpi=150, facecolor=SURFACE)
+    config.PLOT_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    fig.savefig(config.PLOT_DIRECTORY / filename, dpi=150, facecolor=SURFACE)
     if show:
         plt.show()
     return fig

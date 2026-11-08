@@ -49,13 +49,13 @@ def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     return features_data, targets_data
 
 
-def load_targets(targets_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Target frame of TARGET_SOURCE: one column per region if MULTILE_TARGETS, else the sum over regions."""
-    target = targets_data[config.TARGET_SOURCE]
+def load_targets(targets_data: dict[str, pd.DataFrame], target_source: str = config.TARGET_SOURCE) -> pd.DataFrame:
+    """Target frame of target_source: one column per region if MULTILE_TARGETS, else the sum over regions."""
+    target = targets_data[target_source]
     if config.MULTILE_TARGETS:
-        return target.add_prefix(f"{config.TARGET_SOURCE}_").add_suffix("_MW")
+        return target.add_prefix(f"{target_source}_").add_suffix("_MW")
     # min_count=1 keeps NaN where every region is missing, instead of turning it into 0
-    return target.sum(axis=1, min_count=1).to_frame(name=f"{config.TARGET_SOURCE}_MW")
+    return target.sum(axis=1, min_count=1).to_frame(name=f"{target_source}_MW")
 
 
 def load_weather(features_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -73,13 +73,13 @@ def regular_grid(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     return pd.date_range(index.min(), index.max(), freq=pd.Timedelta(config.RESOLUTIONCODE), name="timestamp")
 
 
-def load_dataset() -> Dataset:
-    """Load target and weather and put both on the regular grid spanned by the target."""
+def load_dataset(target_source: str = config.TARGET_SOURCE) -> Dataset:
+    """Load target (default TARGET_SOURCE) and weather and put both on the regular grid spanned by the target."""
     if config.MULTILE_TARGETS:
         raise ValueError("load_dataset supports a single target only, set MULTILE_TARGETS = False")
 
     features_data, targets_data = load_sources()
-    target = load_targets(targets_data).iloc[:, 0]
+    target = load_targets(targets_data, target_source).iloc[:, 0]
     weather = load_weather(features_data)
 
     grid = regular_grid(target.index)
