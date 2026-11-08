@@ -11,7 +11,7 @@ import pandas as pd
 
 import config
 from logger import logger
-from src.datasource import load_elia, load_openmeteo
+from src.datasource import load_elia, load_openmeteo, generate_pv_weather_samples, load_pv_weather_statistics
 from src.features import encode_directions, interpolate_to_15min, merge, merge_dwd_weather
 from src.http_client import HttpClient
 
@@ -23,18 +23,29 @@ class Dataset:
     weather: pd.DataFrame    # weather covariates, directions sin/cos encoded
 
 
+
 def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
-    """Load the raw Elia and Open-Meteo data from the local parquet cache or from the APIs."""
+    """Load the raw Elia and Open-Meteo data from the local parquet cache or via the API."""
     features_data = {}
     targets_data = {}
     for name, src in config.ELIA_SOURCES.items():
         with HttpClient(src["base_url"]) as client:
-            targets_data[name] = load_elia(name, client, src["region"], config.DATA_START, config.DATA_END,
-                                           config.RESOLUTIONCODE)
-    for name, src in config.OPENMETEO_SOURCES.items():
-        with HttpClient(src["base_url"]) as client:
-            features_data[name] = load_openmeteo(name, client, src["latitude"], src["longitude"], src["hourly"],
-                                                 config.DATA_START, config.DATA_END)
+            targets_data[name] = load_elia(name, client, src["regions"], config.DATA_START, config.DATA_END, config.RESOLUTIONCODE)
+    if config.DATA_PV_REGIONS_BOOL:
+        with HttpClient(config.ELIA_SOURCES["solar"]["base_url"]) as elia, HttpClient(config.DATA_PV_NUTS_URL) as nuts:
+            points = generate_pv_weather_samples(elia, nuts)
+        src = config.OPENMETEO_SOURCES["weather"]
+        with HttpClient(src["base_url"], timeout=120) as om:
+            features_data["weather"] = load_pv_weather_statistics("weather", om, points, src["hourly"], config.DATA_START, config.DATA_END)
+    else:
+        for name, src in config.OPENMETEO_SOURCES.items():
+            with HttpClient(src["base_url"]) as client:
+                features_data[name] = load_openmeteo(
+                    name, client, src["latitude"], src["longitude"], src["hourly"],
+                    config.DATA_START, config.DATA_END
+                )
+
+    # return features_data, targets_data
     return features_data, targets_data
 
 

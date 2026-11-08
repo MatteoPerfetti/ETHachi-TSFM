@@ -191,3 +191,52 @@ def plotly_daily_scores(daily: pd.DataFrame, metric: str, models: list[str]) -> 
                                  line=dict(color=colors[model], width=1.6),
                                  hovertemplate=f"{model}: %{{y:,.0f}} MW<extra></extra>"))
     return _plotly_layout(fig, f"Daily {metric} per forecast (issue day on the x axis)", y_title=f"{metric} [MW]")
+
+# ------------- Feature selection plots -------------------
+ACTUAL_COLOR = "#2a78d6"
+PREDICTED_COLOR = "#eb6834"
+def plot_tree_importance(importance: pd.DataFrame, curve: pd.DataFrame, n_selected: int, top_n: int,
+                         filename: str = f"tree_{config.TARGET_SOURCE}_feature_importance.png", show: bool = False,
+                         size_col: str = "n_features", unit: str = "features") -> plt.Figure:
+    """Left: permutation importance (mean ± std over folds) of the top_n features, selected ones highlighted.
+
+    Right: CV RMSE of the top-k features against k (curve[size_col]), with the selected k marked.
+    Expects the outputs of tree_feature_importance and cv_rmse_by_subset_size, or of tree_group_importance and
+    cv_rmse_by_group_count with size_col="n_groups", unit="groups".
+    The figure is saved to PCA_PLOT_DIR / filename.
+    """
+    shown = importance.head(top_n).iloc[::-1]
+    colors = [ACTUAL_COLOR if rank <= n_selected else GRID_COLOR for rank in shown["rank"]]
+
+    fig, (ax_bar, ax_curve) = plt.subplots(1, 2, figsize=(15, max(5, 0.25 * len(shown))), facecolor=SURFACE,
+                                           gridspec_kw={"width_ratios": [3, 2]})
+    ax_bar.barh(shown.index, shown["permutation_mean"], xerr=shown["permutation_std"], color=colors,
+                error_kw={"ecolor": TEXT_SECONDARY, "linewidth": 0.8})
+    ax_bar.set_title(f"Permutation importance (top {len(shown)} {unit}, {n_selected} selected)",
+                     loc="left", color=TEXT_PRIMARY, fontsize=11)
+    ax_bar.set_xlabel("RMSE increase when shuffled (MW)", color=TEXT_SECONDARY)
+    ax_bar.tick_params(axis="y", labelsize=8)
+    ax_bar.grid(axis="x", color=GRID_COLOR, linewidth=0.8)
+
+    ax_curve.errorbar(curve[size_col], curve["cv_rmse"], yerr=curve["cv_rmse_std"], color=PREDICTED_COLOR,
+                      linewidth=2, marker="o", markersize=4, ecolor=GRID_COLOR, capsize=3)
+    ax_curve.axvline(n_selected, color=ACTUAL_COLOR, linestyle="--", linewidth=1.5, label=f"Selected: {n_selected}")
+    ax_curve.set_title(f"CV RMSE of the top-k {unit}", loc="left", color=TEXT_PRIMARY, fontsize=11)
+    ax_curve.set_xlabel(f"Number of {unit} (k)", color=TEXT_SECONDARY)
+    ax_curve.set_ylabel("CV RMSE (MW)", color=TEXT_SECONDARY)
+    ax_curve.grid(axis="y", color=GRID_COLOR, linewidth=0.8)
+    ax_curve.legend(loc="upper right", frameon=False, labelcolor=TEXT_SECONDARY)
+
+    for ax in (ax_bar, ax_curve):
+        ax.set_facecolor(SURFACE)
+        ax.tick_params(colors=TEXT_SECONDARY)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(GRID_COLOR)
+    fig.tight_layout()
+
+    config.PCA_PLOT_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(config.PCA_PLOT_DIR / filename, dpi=150, facecolor=SURFACE)
+    if show:
+        plt.show()
+    return fig
