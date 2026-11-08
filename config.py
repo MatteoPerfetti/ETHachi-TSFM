@@ -36,8 +36,6 @@ MODELS_REGISTRY = {
 }
 TRADITIONAL_MODELS = [k for k, v in MODELS_REGISTRY.items() if v["type"] == "traditional"]
 RUN_TRADITIONAL_MODELS = False         # False: main.py skips the traditional models (XGBoost silenced while being reworked)
-TSFM_MODELS = [k for k, v in MODELS_REGISTRY.items() if v["type"] == "tsfm"]
-MODEL_TYPE = "xgboost"                 # "xgboost"
 
 # ==========================================
 # ------------- Forecast config ----
@@ -106,6 +104,37 @@ CV_N_SPLITS = 5
 CV_TEST_SIZE = None                    # length of each validation fold, None = train span // (n_splits + 1)
 CV_GAP = "0min"                        # time left out between train and validation fold
 CV_MAX_TRAIN_SIZE = None               # max length of the train window, None = expanding window
+
+# ==========================================
+# ------------- Local Plots & tables -------
+# ==========================================
+PLOT_DIRECTORY = Path(__file__).resolve().parent / "plots"
+FEATURES_DIR = Path(__file__).resolve().parent / "data" / "features"  
+TARGET_DIR = Path(__file__).resolve().parent / "data" / "target"      
+# ==========================================
+# ------------- Tree-based feature selection config ----
+# ==========================================
+TREE_SELECTION_BOOL = False           # True: rank features by RandomForest permutation importance on X_train / y_train
+TREE_SELECTION_RF_PARAMS = {           # RandomForestRegressor params; max_features="sqrt" keeps the fits fast
+    "n_estimators": 100,
+    "max_features": "sqrt",
+    "min_samples_leaf": 5,
+    "n_jobs": -1,
+    "random_state": 42,
+}
+TREE_SELECTION_N_REPEATS = 3           # shuffles per feature and fold for permutation importance
+TREE_SELECTION_SUBSET_SIZES = [5, 10, 20, 30, 40, 60, 80, 120]   # top-k sizes evaluated by CV RMSE (all features always added)
+TREE_SELECTION_TOLERANCE = 0.01        # select the smallest top-k with CV RMSE within 1% of all features
+TREE_SELECTION_TOP_N_PLOT = 30         # number of features shown in the importance plot
+TREE_GROUP_SELECTION_BOOL = True       # True: same selection on feature groups (weather variable, lag block, calendar dummy)
+TREE_GROUP_LAG_BLOCK = 12              # consecutive lags per group (24 steps = 6 h at 15 min)
+TREE_SELECTION_DIR = BACKTEST_RESULTS_DIR / "feature_selection"  # saved rankings shown in the dashboard
+TREE_SELECTION_MODES = {               # mode -> (curve size column, unit, dashboard label)
+    "groups": ("n_groups", "groups", "Feature groups"),
+    "features": ("n_features", "features", "Single features"),
+}
+TREE_SELECTION_LAGS = False            # default: target lags as candidates (ranked only, never TSFM covariates)
+TREE_SELECTION_CALENDAR = False        # default: calendar dummies as candidates (ranked only, never TSFM covariates)
 # ==========================================
 # ------------- Data Source config ---------
 # ==========================================
@@ -121,12 +150,12 @@ ELIA_SOURCES = {
     # Elia data set ods031: onshore & offshore wind generation per 15min interval, in MW
     "wind": {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods031/",
-        "region": ['Flanders', 'Wallonia', 'Federal'],
+        "regions": ['Flanders', 'Wallonia', 'Federal'],
     },
     # Elia data set ods032: solar generation per 15min interval, in MW
     "solar": {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/",
-        "region": ['Belgium'],
+        "regions": ['Belgium'],
     }
 }
 RESOLUTIONCODE = "PT15M"               # ISO 8601 duration, as used by Elia's resolutioncode
@@ -144,6 +173,32 @@ OPENMETEO_SOURCES = {
 # Temporary: use local dwd weather data for wind forecast including stochastic features
 DATA_USE_DWD = True                    # required for the wind TSFM_COVARIATES
 DATA_DWD_PATH = DATA_DIR / "dwd" / "gen_weather_dwd.parquet"
+# PV data sample points
+DATA_PV_REGIONS_BOOL = False
+DATA_PV_REGIONS = ["Flemish-Brabant", "West-Flanders", "East-Flanders", "Limburg", "Liège", "Namur", "Brussels", "Hainaut", "Walloon-Brabant", "Antwerp", "Luxembourg"]
+# -- redundant with ELIA_SOURCES["solar"]["regions"]
+
+SOLAR_REGION_DIR = DATA_DIR / "solar-region"
+DATA_PV_PRODUCTION_YEAR = 2025
+DATA_PV_WEATHER_SAMPLES = 200
+DATA_PV_RANDOM_SEED = 42
+# statistics that summarize all PV weather sample points per timestep and variable (pandas aggregation names)
+STATISTICAL_PROPERTIES = ["mean", "std", "min", "max", "skew", "kurt"]
+# Elia region -> NUTS 2 code, polygons from Nuts2json (2024 NUTS, WGS84 lon/lat, 1:10M)
+DATA_PV_NUTS = {
+    "Brussels": "BE10",
+    "Antwerp": "BE21",
+    "Limburg": "BE22",
+    "East-Flanders": "BE23",
+    "Flemish-Brabant": "BE24",
+    "West-Flanders": "BE25",
+    "Walloon-Brabant": "BE31",
+    "Hainaut": "BE32",
+    "Liège": "BE33",
+    "Luxembourg": "BE34",
+    "Namur": "BE35",
+}
+DATA_PV_NUTS_URL = "https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2024/4326/10M/nutsrg_2.json"
 # ==========================================
 
 LOG_LEVEL = "INFO"                     # DEBUG, INFO, WARNING, ERROR

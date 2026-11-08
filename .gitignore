@@ -1,6 +1,6 @@
 __pycache__/
 claude/
-# data/   -- for now use parquet files 
+data/   
 data/solar/
 data/wind/
 data/weather/
