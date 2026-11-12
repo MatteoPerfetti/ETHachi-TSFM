@@ -20,7 +20,11 @@ from src.validate_config import validate_config
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
 # Charts use theme=None: our colors and legend layout (src/plotter.py) instead of Streamlit's chart theme
 
-RUNNABLE_MODELS = [k for k, v in config.MODELS_REGISTRY.items() if v["type"] in ("tsfm", "baseline")]
+RUNNABLE_MODELS = [
+    key
+    for key, value in config.MODELS_REGISTRY.items()
+    if value["type"] in ("tsfm", "traditional", "baseline", "ensemble")
+]
 WINDOW_LABELS = {"all": "All forecast steps", "d+1": "Only D+1 (next day 00:00–23:45, as Predico)"}
 SCORE_LABELS = {"RMSE": "RMSE [MW]", "Winkler80": "Winkler 80% [MW]", "RMSE_vs_persistence": "vs Persistence",
                 "days": "days"}
@@ -109,6 +113,19 @@ def new_backtest_form(expanded: bool) -> None:
                                       value=config.BACKTEST_HORIZON_STEPS)
             latency = st.number_input("Data latency [steps]", min_value=0, max_value=96,
                                       value=config.BACKTEST_LATENCY_STEPS)
+            traditional_strategy = st.selectbox(
+                "Traditional ML feature mode",
+                config.TRADITIONAL_STRATEGIES,
+                index=config.TRADITIONAL_STRATEGIES.index(config.TRADITIONAL_STRATEGY),
+                help=(
+                    "origin_aligned repeats the latest target context across the horizon; "
+                    "fixed_gap uses horizon-safe timestamp-wise lags. Optuna is not run here."
+                ),
+            )
+            st.caption(
+                "Ensembles automatically run all traditional base models using the selected feature mode. "
+                "Their lookback, top-K, and decay defaults are defined in src/ensembles.py."
+            )
             # default: the covariates ticked in the feature selection table, else the ones from config.py
             default = st.session_state.get("ticked_covariates", {}).get(target, config.TSFM_COVARIATES.get(target, []))
             covariates = st.multiselect("Weather covariates (TSFMs) - selection", list(dataset.weather.columns),
@@ -122,7 +139,8 @@ def new_backtest_form(expanded: bool) -> None:
             st.sidebar.error("Choose at least one model.")
             return
         settings = BacktestSettings(context_steps=int(context), horizon_steps=int(horizon),
-                                    latency_steps=int(latency), covariates=covariates, target_source=target)
+                                    latency_steps=int(latency), covariates=covariates,
+                                    traditional_strategy=traditional_strategy, target_source=target)
         with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
             save_backtest(run_backtest(dataset, models, settings))
         st.session_state["run"] = settings.run_name
@@ -132,18 +150,42 @@ def new_backtest_form(expanded: bool) -> None:
 def run_caption(meta: dict) -> str:
     s = meta["settings"]
     covariates = ", ".join(s["covariates"]) if s["covariates"] else "none"
-    return (f"Target **{meta['target']}** · issue {s['issue_time']} UTC · horizon {s['horizon_steps']} steps · "
+    caption = (f"Target **{meta['target']}** · issue {s['issue_time']} UTC · horizon {s['horizon_steps']} steps · "
             f"context {s['context_steps']} steps · latency {s['latency_steps']} steps  \n"
             f"Test {s['test_start'][:10]} – {s['test_end'][:10]} · skipped days: {len(meta['skipped'])}  \n"
             f"Covariates: {covariates}")
+    traditional = [
+        f"{model}: {values['strategy']}"
+        for model, values in meta.get("model_configs", {}).items()
+        if values.get("strategy") and not values.get("ensemble_key")
+    ]
+    if traditional:
+        caption += "  \nTraditional benchmarks: " + ", ".join(traditional)
+    ensembles = [
+        f"{model}: {values['strategy']}, bases={len(values['base_models'])}, "
+        f"parameters={values['parameters']}"
+        for model, values in meta.get("model_configs", {}).items()
+        if values.get("ensemble_key")
+    ]
+    if ensembles:
+        caption += "  \nEnsembles: " + ", ".join(ensembles)
+    return caption
 
 
 def metrics_tab(predictions: pd.DataFrame, models: list[str], window: str, meta: dict) -> None:
     table = summary(predictions, window)
     shown = table.rename(columns=SCORE_LABELS)[[SCORE_LABELS[c] for c in SCORE_LABELS if c in table.columns]]
     formats = {"RMSE [MW]": "{:,.1f}", "Winkler 80% [MW]": "{:,.1f}", "vs Persistence": "{:+.0%}", "days": "{:d}"}
-    st.dataframe(shown.style.format({k: v for k, v in formats.items() if k in shown.columns}, na_rep="–")
-                 .highlight_min(subset=["RMSE [MW]", "Winkler 80% [MW]"], color="#d4edda"), width="stretch")
+    best_result_style = "background-color: #d4edda; color: #0b0b0b;"
+    st.dataframe(
+        shown.style
+        .format({k: v for k, v in formats.items() if k in shown.columns}, na_rep="–")
+        .highlight_min(
+            subset=["RMSE [MW]", "Winkler 80% [MW]"],
+            props=best_result_style,
+        ),
+        width="stretch",
+    )
     st.caption("Scores of each forecast, averaged over the days (Predico); lower is better, best in green. "
                "Winkler 80%: width of the q10–q90 interval plus 10× the distance of actual values outside it. "
                "vs Persistence: RMSE relative to persistence (shown if persistence is selected).")

@@ -1,6 +1,8 @@
 __pycache__/
+.venv/
+.venv314/
 claude/
-data/   
+data/
 data/solar/
 data/wind/
 data/weather/

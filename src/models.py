@@ -1,14 +1,10 @@
 from collections.abc import Iterator
 
-import numpy as np
 import pandas as pd
-from sklearn.metrics import root_mean_squared_error
 
 
 # ==========================================
 # ------------- Train/Test split -----------
-
-
 
 def _to_index_tz(value: str | pd.Timestamp, index: pd.DatetimeIndex) -> pd.Timestamp:
     """Parse a timestamp (UTC if no zone is given) and match the timezone awareness of the index."""
@@ -16,6 +12,7 @@ def _to_index_tz(value: str | pd.Timestamp, index: pd.DatetimeIndex) -> pd.Times
     ts = pd.Timestamp(value)
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
     return ts if index.tz is not None else ts.tz_convert(None)
+
 
 def split_train_test(df: pd.DataFrame, train_start: str, train_end: str, test_start: str,
                      test_end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -27,9 +24,13 @@ def split_train_test(df: pd.DataFrame, train_start: str, train_end: str, test_st
     return train, test
 
 
-def cross_validation_splits(df: pd.DataFrame, n_splits: int, test_size: str | pd.Timedelta | None,
-                            gap: str | pd.Timedelta,
-                            max_train_size: str | pd.Timedelta | None) -> Iterator[tuple[pd.DataFrame, pd.DataFrame]]:
+def cross_validation_splits(
+    df: pd.DataFrame,
+    n_splits: int,
+    test_size: str | pd.Timedelta | None,
+    gap: str | pd.Timedelta,
+    max_train_size: str | pd.Timedelta | None,
+) -> Iterator[tuple[pd.DataFrame, pd.DataFrame]]:
     """Yield (train, validation) frames for expanding-window cross validation, split by timestamp.
 
     The validation folds are consecutive time windows of length test_size ending at the last timestamp
@@ -48,32 +49,3 @@ def cross_validation_splits(df: pd.DataFrame, n_splits: int, test_size: str | pd
         train = df[(df.index >= train_start) & (df.index < train_end)]
         val = df[(df.index >= val_start) & (df.index < val_end)]
         yield train, val
-
-
-# ==========================================
-# ------------- Run model ------------------
-def translate_model(modelname: str):
-    """Translate a model name string to the corresponding sklearn-compatible regressor class."""
-    if modelname == "xgboost":
-        from xgboost import XGBRegressor
-        return XGBRegressor()
-    else:
-        raise ValueError(f"Unknown model name: {modelname}")
-
-def run_model(modelname: str, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.DataFrame,
-              y_test: pd.DataFrame) -> tuple[float, pd.Series]:
-    """Fit any sklearn-compatible regressor (e.g. xgboost.XGBRegressor) on train, predict test, return the RMSE.
-
-    For several target columns the RMSE is averaged uniformly over them.
-    """
-    model = translate_model(modelname)  
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-    rmse = root_mean_squared_error(y_test, y_pred)
-    return float(rmse), y_pred
-
-
-
-
-
-        

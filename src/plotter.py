@@ -2,6 +2,7 @@ from pathlib import Path
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -24,9 +25,79 @@ BACKTEST_COLORS = {
     "Timestral-209M": "#eb6834",
     "TimesFM-3": "#1baf7a",
     "Persistence": "#eda100",
+    "XGBoost [origin_aligned]": "#6250d6",
+    "XGBoost [fixed_gap]": "#9b8cf0",
+    "LightGBM [origin_aligned]": "#008300",
+    "LightGBM [fixed_gap]": "#62ad62",
+    "CatBoost [origin_aligned]": "#e34948",
+    "CatBoost [fixed_gap]": "#ed8c8c",
+    "NGBoost [origin_aligned]": "#b45f06",
+    "NGBoost [fixed_gap]": "#dc9a55",
+    "TabNet [origin_aligned]": "#087f9c",
+    "TabNet [fixed_gap]": "#62b3c7",
 }
 FALLBACK_COLORS = ["#e87ba4", "#008300", "#6250d6", "#e34948"]  # next slots, for models not listed above
 
+
+def plot_forecast(
+    y_test: pd.Series | pd.DataFrame,
+    y_pred: np.ndarray | pd.Series | pd.DataFrame,
+    rmse: float | None = None,
+    path: str | Path | None = None,
+    show: bool = True,
+    lower: np.ndarray | pd.Series | None = None,
+    upper: np.ndarray | pd.Series | None = None,
+) -> plt.Figure:
+    """Plot one non-rolling train/test forecast, including an optional interval."""
+    if isinstance(y_test, pd.Series):
+        y_test = y_test.to_frame()
+    prediction = pd.DataFrame(
+        np.asarray(y_pred).reshape(len(y_test), -1),
+        index=y_test.index,
+        columns=y_test.columns,
+    )
+    lower_frame = None if lower is None else pd.DataFrame(
+        np.asarray(lower).reshape(len(y_test), -1), index=y_test.index, columns=y_test.columns
+    )
+    upper_frame = None if upper is None else pd.DataFrame(
+        np.asarray(upper).reshape(len(y_test), -1), index=y_test.index, columns=y_test.columns
+    )
+
+    fig, axes = plt.subplots(
+        len(y_test.columns),
+        1,
+        figsize=(12, 3.5 * len(y_test.columns)),
+        sharex=True,
+        squeeze=False,
+        facecolor=SURFACE,
+    )
+    for ax, column in zip(axes[:, 0], y_test.columns):
+        ax.set_facecolor(SURFACE)
+        ax.plot(y_test.index, y_test[column], color="#2a78d6", linewidth=2, label="Actual")
+        ax.plot(prediction.index, prediction[column], color="#eb6834", linewidth=2,
+                linestyle="--", label="Q50")
+        if lower_frame is not None and upper_frame is not None:
+            ax.fill_between(y_test.index, lower_frame[column], upper_frame[column],
+                            color="#eb6834", alpha=0.18, label="Q10-Q90")
+        ax.set_title(column, loc="left", color=TEXT_PRIMARY, fontsize=11)
+        ax.set_ylabel("MW", color=TEXT_SECONDARY)
+        ax.grid(axis="y", color=GRID_COLOR, linewidth=0.8)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.legend(loc="upper right", frameon=False)
+
+    title = "Forecast vs. actual (test period)"
+    if rmse is not None:
+        title += f"  ·  RMSE {rmse:,.1f} MW"
+    fig.suptitle(title, x=0.01, ha="left", color=TEXT_PRIMARY, fontsize=13)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    if path is not None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=150, facecolor=SURFACE)
+    if show:
+        plt.show()
+    return fig
 
 def model_colors(models: list[str]) -> dict[str, str]:
     """Fixed color of each model; models not in BACKTEST_COLORS take the next palette slots."""
@@ -90,7 +161,7 @@ def plot_backtest(predictions: pd.DataFrame, run_name: str,
     axes[-1, 0].set_xlabel("Time [UTC]", color=TEXT_SECONDARY)
     axes[-1, 0].xaxis.set_major_locator(locator)
     axes[-1, 0].xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-    regions = "+".join(config.ELIA_SOURCES[config.TARGET_SOURCE]["region"])
+    regions = "+".join(config.ELIA_SOURCES[config.TARGET_SOURCE]["regions"])
     fig.suptitle(f"{config.TARGET_SOURCE.capitalize()} ({regions}): forecasts issued daily at "
                  f"{config.BACKTEST_ISSUE_TIME} UTC, D+1 part stitched, "
                  f"{start_ts:%d %b} – {end_ts - pd.Timedelta(days=1):%d %b %Y}\nrun {run_name}",
@@ -105,7 +176,6 @@ def plot_backtest(predictions: pd.DataFrame, run_name: str,
     if show:
         plt.show()
     return fig
-
 
 # ------------- Interactive (Plotly) versions, used by the dashboard (app.py) -------------
 def _plotly_layout(fig: go.Figure, title: str, y_title: str = "Power [MW]", x_title: str = "Time [UTC]") -> go.Figure:
