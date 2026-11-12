@@ -36,6 +36,7 @@ class BacktestSettings:
     latency_steps: int = config.BACKTEST_LATENCY_STEPS
     covariates: list[str] = field(default_factory=lambda: list(config.TSFM_COVARIATES[config.TARGET_SOURCE]))
     traditional_strategy: str = config.TRADITIONAL_STRATEGY
+    target_source: str = config.TARGET_SOURCE
 
     @property
     def run_name(self) -> str:
@@ -45,7 +46,7 @@ class BacktestSettings:
             covariates = f"cov{len(self.covariates)}-{digest}"
         else:
             covariates = "nocov"
-        return (f"{config.TARGET_SOURCE}_ctx{self.context_steps}_h{self.horizon_steps}"
+        return (f"{self.target_source}_ctx{self.context_steps}_h{self.horizon_steps}"
                 f"_lat{self.latency_steps}_{covariates}")
 
 
@@ -259,7 +260,7 @@ def save_backtest(result: BacktestResult, directory: Path = config.BACKTEST_RESU
         }
     predictions.to_parquet(path)
     meta = {
-        "target": config.TARGET_SOURCE,
+        "target": result.settings.target_source,
         "settings": asdict(result.settings),
         "models": sorted(predictions["model"].unique().tolist()),
         "skipped": [t.isoformat() for t in result.skipped],

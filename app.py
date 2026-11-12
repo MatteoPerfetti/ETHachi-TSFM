@@ -5,14 +5,16 @@
 Saved runs are read from results/ (written by main.py or by the form in the sidebar), nothing is recomputed
 to look at them. Defaults come from config.py.
 """
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
 import config
 from src.backtest import BacktestSettings, load_backtest, run_backtest, save_backtest, saved_runs
 from src.dataset import load_dataset
+from src.feature_selection import load_selection, run_tree_selection, save_selection, tsfm_covariates
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
-from src.plotter import plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
+from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
 from src.validate_config import validate_config
 
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
@@ -29,8 +31,64 @@ SCORE_LABELS = {"RMSE": "RMSE [MW]", "Winkler80": "Winkler 80% [MW]", "RMSE_vs_p
 
 
 @st.cache_resource(show_spinner="Loading dataset...")
-def get_dataset():
-    return load_dataset()
+def get_dataset(target_source: str = config.TARGET_SOURCE):
+    return load_dataset(target_source)
+
+
+def feature_selection_section() -> None:
+    """Feature selection for the TSFM covariates: settings first in the sidebar, one tab per target source."""
+    modes = config.TREE_SELECTION_MODES
+    with st.sidebar.expander("Feature selection - Random Forest Tree", expanded=False):
+        mode = st.radio("Rank", list(modes), format_func=lambda m: modes[m][2],
+                        index=list(modes).index("groups" if config.TREE_GROUP_SELECTION_BOOL else "features"))
+        lags = st.checkbox("Target lags as candidates", value=config.TREE_SELECTION_LAGS)
+        calendar = st.checkbox("Calendar dummies as candidates", value=config.TREE_SELECTION_CALENDAR)
+        top_n = st.number_input("Bars shown", min_value=5, max_value=200, value=config.TREE_SELECTION_TOP_N_PLOT)
+        st.caption("Note: Weather covariates are included by default")
+    with st.expander("🔎 Feature selection for the TSFM covariates", expanded=False):
+        sources = list(config.ELIA_SOURCES)
+        for tab, source in zip(st.tabs([s.capitalize() for s in sources]), sources):
+            with tab:
+                selection_tab(source, mode, lags, calendar, int(top_n))
+
+
+def selection_tab(source: str, mode: str, lags: bool, calendar: bool, top_n: int) -> None:
+    """Run (or re-run) the selection of one target, then show its graph and a table to pick the TSFM covariates."""
+    if st.button(f"Run feature selection for {source}", key=f"selection_{source}"):
+        dataset = get_dataset(source)
+        with st.spinner(f"Ranking the features of {source} on the training period..."):
+            save_selection(run_tree_selection(source, dataset.target, dataset.weather, mode, lags, calendar))
+    result = load_selection(source, mode, lags, calendar)
+    if result is None:
+        st.info("No saved selection for these settings yet: run it with the button. RandomForest fits on the "
+                f"training period {config.TRAIN_START[:10]} – {config.TRAIN_END[:10]}, takes minutes.")
+        return
+
+    size_col, unit, _ = config.TREE_SELECTION_MODES[mode]
+    fig = plot_tree_importance(result.importance, result.curve, None, top_n,
+                               filename=f"tree_{source}_{mode}_importance.png", size_col=size_col, unit=unit)
+    st.pyplot(fig)
+    plt.close(fig)
+
+    top = result.importance.head(top_n)
+    current = config.TSFM_COVARIATES.get(source, [])
+    in_config = [bool(set(tsfm_covariates(result, [name])) & set(current)) for name in top.index]
+    table = pd.DataFrame({"select": False, "importance [MW]": top["permutation_mean"].round(3), "in config.py": in_config},
+                         index=top.index.rename(unit[:-1]))
+    if "statistics" in top:
+        table.insert(1, "statistics", top["statistics"].fillna(""))
+    edited = st.data_editor(table, disabled=[c for c in table.columns if c != "select"], width="content",
+                            key=f"covariate_table_{source}_{mode}_{lags}_{calendar}")
+    covariates = tsfm_covariates(result, list(edited.index[edited["select"]]))
+    st.code(f'"{source}": {covariates},', language="python")
+    st.caption(f"Tick the {unit} to use: their weather columns are added to the list above (lags and calendar dummies "
+               "are left out). Paste it into TSFM_COVARIATES in config.py, or run a backtest: the form in the sidebar "
+               "takes the ticked covariates of the target source as its default.")
+    ticked = st.session_state.setdefault("ticked_covariates", {})
+    if covariates:
+        ticked[source] = covariates
+    else:
+        ticked.pop(source, None)
 
 
 @st.cache_data(show_spinner="Loading backtest results...")
@@ -42,7 +100,10 @@ def get_run(run_name: str, modified: float) -> pd.DataFrame:
 def new_backtest_form(expanded: bool) -> None:
     """Sidebar form: run a backtest with the chosen models, context, horizon, latency and covariates, then save it."""
     with st.sidebar.expander("Run a new backtest", expanded=expanded):
-        dataset = get_dataset()
+        # outside the form: changing the target reloads the dataset and the covariate options right away
+        sources = list(config.ELIA_SOURCES)
+        target = st.selectbox("Target source", sources, index=sources.index(config.TARGET_SOURCE))
+        dataset = get_dataset(target)
         with st.form("new_backtest"):
             models = st.multiselect("Models", RUNNABLE_MODELS,
                                     default=[m for m in config.BACKTEST_MODELS if m in RUNNABLE_MODELS])
@@ -65,8 +126,11 @@ def new_backtest_form(expanded: bool) -> None:
                 "Ensembles automatically run all traditional base models using the selected feature mode. "
                 "Their lookback, top-K, and decay defaults are defined in src/ensembles.py."
             )
-            covariates = st.multiselect("Weather covariates", list(dataset.weather.columns),
-                                        default=config.TSFM_COVARIATES[config.TARGET_SOURCE])
+            # default: the covariates ticked in the feature selection table, else the ones from config.py
+            default = st.session_state.get("ticked_covariates", {}).get(target, config.TSFM_COVARIATES.get(target, []))
+            covariates = st.multiselect("Weather covariates (TSFMs) - selection", list(dataset.weather.columns),
+                                        default=[c for c in default if c in dataset.weather.columns],
+                                        key=f"covariates_{target}")
             submitted = st.form_submit_button("Run backtest", type="primary")
         st.caption("A full year takes minutes per TSFM on CPU. Re-running a model with the same settings "
                    "replaces only its forecasts in the saved run.")
@@ -76,7 +140,7 @@ def new_backtest_form(expanded: bool) -> None:
             return
         settings = BacktestSettings(context_steps=int(context), horizon_steps=int(horizon),
                                     latency_steps=int(latency), covariates=covariates,
-                                    traditional_strategy=traditional_strategy)
+                                    traditional_strategy=traditional_strategy, target_source=target)
         with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
             save_backtest(run_backtest(dataset, models, settings))
         st.session_state["run"] = settings.run_name
@@ -171,6 +235,7 @@ def single_tab(predictions: pd.DataFrame, models: list[str], window: str, bands:
 def main() -> None:
     validate_config()
     st.title("⚡ ETHachi-TSFM backtest")
+    feature_selection_section()
 
     runs = saved_runs()
     new_backtest_form(expanded=not runs)

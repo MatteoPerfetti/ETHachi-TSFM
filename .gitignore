@@ -2,7 +2,7 @@ __pycache__/
 .venv/
 .venv314/
 claude/
-# data/   -- for now use parquet files 
+data/
 data/solar/
 data/wind/
 data/weather/
