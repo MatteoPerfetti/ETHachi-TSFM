@@ -10,7 +10,8 @@ from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
 from config import (DATA_DIR, SOLAR_REGION_DIR, DATA_PV_NUTS, DATA_PV_PRODUCTION_YEAR, DATA_PV_RANDOM_SEED, DATA_PV_REGIONS,
-                    DATA_PV_WEATHER_SAMPLES, RESOLUTIONCODE, STATISTICAL_PROPERTIES)
+                    DATA_PV_WEATHER_SAMPLES, RESOLUTIONCODE, STATISTICAL_PROPERTIES, ELIA_SOURCES, WIND_REGION_DIR,
+                    DATA_WIND_FARMS_PATH, DATA_WIND_PRODUCTION_YEAR, DATA_WIND_WEATHER_SAMPLES, DATA_WIND_RANDOM_SEED)
 from logger import logger
 from src.http_client import HttpClient, HttpError
 
@@ -114,9 +115,9 @@ def fetch_elia_production(client: HttpClient, regions: list[str], start: str, en
                           resolutioncode: str) -> pd.Series:
     """Return the measured energy per region in MWh over [start, end), summed server side by the Elia API."""
     resp = client.get_json("records", {
-        "select": "regions, sum(measured) as measured",
+        "select": "region, sum(measured) as measured",
         "where": elia_where(regions, start, end, resolutioncode),
-        "group_by": "regions",
+        "group_by": "region",
         "limit": len(regions),
     })
     hours_per_step = pd.Timedelta(resolutioncode) / pd.Timedelta("1h")
@@ -265,10 +266,10 @@ def fetch_openmeteo_region(client: HttpClient, points: pd.DataFrame, variables: 
 
 
 def load_openmeteo_region(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str], start: str,
-                          end: str) -> pd.DataFrame:
-    """Return the raw point data from the local cache if present, else fetch it from the Open-Meteo API and
-    cache it."""
-    path = SOLAR_REGION_DIR / f"{name}_points_{cache_path(name, start, end, 'PT1H').name}"
+                          end: str, directory: Path = SOLAR_REGION_DIR) -> pd.DataFrame:
+    """Return the raw point data from the local cache in `directory` if present, else fetch it from the
+    Open-Meteo API and cache it."""
+    path = directory / f"{name}_points_{cache_path(name, start, end, 'PT1H').name}"
     if path.exists():
         logger.info("Loaded %s from cache %s", name, path)
         return pd.read_parquet(path)
@@ -294,14 +295,90 @@ def reduce_openmeteo_region(df: pd.DataFrame, variables: list[str]) -> pd.DataFr
 
 
 def load_pv_weather_statistics(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str],
-                               start: str, end: str) -> pd.DataFrame:
-    """Return the per-timestep statistics over all points from data/solar-region if present, else compute them
-    from the raw point data (see load_openmeteo_region) and cache them."""
-    path = SOLAR_REGION_DIR / f"{name}_{cache_path(name, start, end, 'PT1H').name}"
+                               start: str, end: str, directory: Path = SOLAR_REGION_DIR) -> pd.DataFrame:
+    """Return the per-timestep statistics over all points from `directory` (data/solar-region by default) if
+    present, else compute them from the raw point data (see load_openmeteo_region) and cache them."""
+    path = directory / f"{name}_{cache_path(name, start, end, 'PT1H').name}"
     if path.exists():
         logger.info("Loaded %s statistics from cache %s", name, path)
         return pd.read_parquet(path)
-    stats = reduce_openmeteo_region(load_openmeteo_region(name, client, points, variables, start, end), variables)
+    stats = reduce_openmeteo_region(
+        load_openmeteo_region(name, client, points, variables, start, end, directory), variables)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stats.to_parquet(path)
+    logger.info("Cached %s statistics (%d rows) to %s", name, len(stats), path)
+    return stats
+
+# ==========================================
+# ------------- Wind weather sample points -------------
+
+def load_wind_region_probabilities(client: HttpClient, regions: list[str] = ELIA_SOURCES["wind"]["regions"],
+                                   year: int = DATA_WIND_PRODUCTION_YEAR,
+                                   resolutioncode: str = RESOLUTIONCODE) -> pd.Series:
+    """Return the sampling probability of each region: its share of the Belgian wind production in `year`.
+
+    Uses the cached csv if it holds all regions, else fetches the yearly production from the Elia wind
+    dataset and caches it. The Belgian total is the sum over `regions`, so the probabilities sum to 1.
+    """
+    path = WIND_REGION_DIR / f"production_share_{year}.csv"
+    df = pd.read_csv(path, index_col="region") if path.exists() else None
+    if df is not None and set(regions) <= set(df.index):
+        logger.info("Loaded wind region production shares from cache %s", path)
+    else:
+        logger.info("Fetching %d wind region production from the Elia API", year)
+        start, end = f"{year}-01-01T00:00:00Z", f"{year + 1}-01-01T00:00:00Z"
+        production = fetch_elia_production(client, regions, start, end, resolutioncode)
+        df = pd.DataFrame({"production_mwh": production, "share": production / production.sum()}).rename_axis("region")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path)
+        logger.info("Cached wind region production shares to %s", path)
+    share = df.loc[regions, "share"]
+    return (share / share.sum()).rename("probability")
+
+
+def sample_wind_farm_points(probabilities: pd.Series, farms: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
+    """Draw a region for each of the n samples by probability, then a wind farm of that region weighted by its
+    capacity_mw. Farms can be drawn more than once. Returns latitude, longitude and region per sample."""
+    rng = np.random.default_rng(seed)
+    regions = rng.choice(probabilities.index.to_numpy(), size=n, p=probabilities.to_numpy())
+    samples = []
+    for region, count in zip(*np.unique(regions, return_counts=True)):
+        in_region = farms[farms["regions"] == region]
+        weights = in_region["capacity_mw"] / in_region["capacity_mw"].sum()
+        picked = in_region.iloc[rng.choice(len(in_region), size=count, p=weights.to_numpy())]
+        samples.append(pd.DataFrame({"latitude": picked["lat"], "longitude": picked["lon"], "region": region}))
+    return pd.concat(samples, ignore_index=True)
+
+
+def generate_wind_weather_samples(elia_client: HttpClient, regions: list[str] = ELIA_SOURCES["wind"]["regions"],
+                                  n_samples: int = DATA_WIND_WEATHER_SAMPLES,
+                                  seed: int = DATA_WIND_RANDOM_SEED) -> pd.DataFrame:
+    """Return n_samples random weather sample points (latitude, longitude, region) at wind farm locations,
+    spread over the regions in proportion to their wind production. elia_client is bound to the Elia wind dataset."""
+    probabilities = load_wind_region_probabilities(elia_client, regions)
+    farms = pd.read_csv(DATA_WIND_FARMS_PATH, sep=";")
+    return sample_wind_farm_points(probabilities, farms, n_samples, seed)
+
+
+def load_wind_weather_statistics(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str],
+                                 start: str, end: str) -> pd.DataFrame:
+    """Return the per-timestep statistics over all sample points from data/wind-region if present, else compute
+    and cache them.
+
+    A farm drawn several times is fetched once; its rows are repeated once per draw before the reduction, so it
+    weighs in the statistics as often as it was drawn.
+    """
+    path = WIND_REGION_DIR / f"{name}_{cache_path(name, start, end, 'PT1H').name}"
+    if path.exists():
+        logger.info("Loaded %s statistics from cache %s", name, path)
+        return pd.read_parquet(path)
+    coordinates = ["latitude", "longitude"]
+    unique = points[coordinates].drop_duplicates().reset_index(drop=True)
+    draws = points[coordinates].merge(unique.reset_index(names="point"), on=coordinates)["point"].value_counts()
+    logger.info("%d wind samples cover %d distinct farms", len(points), len(unique))
+    raw = load_openmeteo_region(name, client, unique, variables, start, end, WIND_REGION_DIR)
+    raw = raw.loc[raw.index.repeat(raw["point"].map(draws))]
+    stats = reduce_openmeteo_region(raw, variables)
     path.parent.mkdir(parents=True, exist_ok=True)
     stats.to_parquet(path)
     logger.info("Cached %s statistics (%d rows) to %s", name, len(stats), path)
