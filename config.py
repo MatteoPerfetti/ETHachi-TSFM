@@ -179,7 +179,7 @@ OPENMETEO_SOURCES = {
         "base_url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
         "latitude": 50.2581,
         "longitude": 4.9117,
-        "hourly": [
+        "hourly_pv": [
             "cloud_cover_low",
             "cloud_cover_mid",
             "cloud_cover_high",
@@ -187,6 +187,21 @@ OPENMETEO_SOURCES = {
             "diffuse_radiation",
             "direct_normal_irradiance",
         ],
+        "hourly_wind": [                
+                    "temperature_2m",
+                    "relative_humidity_2m",
+                    "pressure_msl",
+                    "surface_pressure",
+                    "wind_speed_10m",
+                    "wind_speed_80m",
+                    "wind_speed_120m",
+                    "wind_speed_180m",
+                    "wind_direction_10m",
+                    "wind_direction_80m",
+                    "wind_direction_120m",
+                    "wind_direction_180m",
+                    "wind_gusts_10m",
+                ],
     }
 }
 DATA_USE_DWD = True
@@ -228,6 +243,13 @@ DATA_PV_NUTS = {
 DATA_PV_NUTS_URL = (
     "https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2024/4326/10M/nutsrg_2.json"
 )
+
+# Wind data sample points and spatial weather aggregation.
+WIND_REGION_DIR = DATA_DIR / "wind-region"
+DATA_WIND_FARMS_PATH = DATA_DIR / "wind" / "belgium_wind_farms.csv"
+DATA_WIND_PRODUCTION_YEAR = 2025
+DATA_WIND_WEATHER_SAMPLES = 50
+DATA_WIND_RANDOM_SEED = 42
 
 LOG_LEVEL = "INFO"
 LOG_FILE = None
