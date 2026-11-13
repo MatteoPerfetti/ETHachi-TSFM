@@ -11,7 +11,7 @@ import pandas as pd
 
 import config
 from logger import logger
-from src.datasource import load_elia, load_openmeteo, generate_pv_weather_samples, load_pv_weather_statistics
+from src.datasource import load_elia, load_openmeteo, generate_pv_weather_samples, load_weather_statistics
 from src.features import encode_directions, interpolate_to_15min, merge, merge_dwd_weather
 from src.http_client import HttpClient
 
@@ -36,7 +36,8 @@ def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
             points = generate_pv_weather_samples(elia, nuts)
         src = config.OPENMETEO_SOURCES["weather"]
         with HttpClient(src["base_url"], timeout=120) as om:
-            features_data["weather"] = load_pv_weather_statistics("weather", om, points, src["hourly_pv"], config.DATA_START, config.DATA_END)
+            features_data["weather"] = load_weather_statistics("weather", om, points, src["hourly_pv"], config.DATA_START,
+                                                               config.DATA_END, config.SOLAR_REGION_DIR)
     else:
         for name, src in config.OPENMETEO_SOURCES.items():
             with HttpClient(src["base_url"]) as client:
