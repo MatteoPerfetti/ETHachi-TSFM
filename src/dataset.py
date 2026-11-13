@@ -36,12 +36,12 @@ def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
             points = generate_pv_weather_samples(elia, nuts)
         src = config.OPENMETEO_SOURCES["weather"]
         with HttpClient(src["base_url"], timeout=120) as om:
-            features_data["weather"] = load_pv_weather_statistics("weather", om, points, src["hourly"], config.DATA_START, config.DATA_END)
+            features_data["weather"] = load_pv_weather_statistics("weather", om, points, src["hourly_pv"], config.DATA_START, config.DATA_END)
     else:
         for name, src in config.OPENMETEO_SOURCES.items():
             with HttpClient(src["base_url"]) as client:
                 features_data[name] = load_openmeteo(
-                    name, client, src["latitude"], src["longitude"], src["hourly"],
+                    name, client, src["latitude"], src["longitude"], src["hourly_pv"] + src["hourly_wind"],
                     config.DATA_START, config.DATA_END
                 )
 
