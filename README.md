@@ -191,6 +191,7 @@ Write a class implementing `Forecaster` (`src/forecast.py`): set `name`, `min_co
   Federal (offshore) wind, so the grid points are the offshore parks.
 - **Open-Meteo** historical forecast API (https://open-meteo.com): hourly cloud cover and radiation at one point
   in Belgium, for the solar covariates.
+- **Wind power coordinates** taken from List of power stations in Belgium (https://en.wikipedia.org/wiki/List_of_power_stations_in_Belgium) and List of offshore wind farms in Belgium (https://en.wikipedia.org/wiki/List_of_offshore_wind_farms_in_Belgium). Use only coordinates with production above 5 MW to rule out small onshore wind power.
 
 ## Known limitations and next steps
 
