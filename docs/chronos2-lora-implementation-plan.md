@@ -7,14 +7,14 @@ See the [tuning and backtest architecture](tuning-architecture.md) for Hydra con
 The first experiment uses only a **3-day context (288 steps)** and the unchanged **39-hour horizon (156 steps)**. The 1-day, 7-day, and 14-day settings and retrieval experiments come later. Run this phase directly from the project root.
 
 ```powershell
-python train_chronos2.py --run-id wind-3d-smoke --context-days 3 --device cpu --steps 3 --batch-size 1
-python train_chronos2.py --run-id wind-3d-r8-seed42 --context-days 3 --device cpu --steps 200 --batch-size 8
+python -m tuning.train_chronos2 --run-id wind-3d-smoke --context-days 3 --device cpu --steps 3 --batch-size 1
+python -m tuning.train_chronos2 --run-id wind-3d-r8-seed42 --context-days 3 --device cpu --steps 200 --batch-size 8
 ```
 
 The original run used Chronos-2's native model and quantile loss with custom PyTorch LoRA matrices. To use Chronos-2's official `fit()` method with PEFT on the same split and horizon, add `--backend peft` and use a new run ID:
 
 ```powershell
-python train_chronos2.py --backend peft --run-id wind-3d-peft-r8-seed42 --context-days 3 --device cpu --steps 200 --batch-size 8
+python -m tuning.train_chronos2 --backend peft --run-id wind-3d-peft-r8-seed42 --context-days 3 --device cpu --steps 200 --batch-size 8
 ```
 
 Both paths read the existing wind Parquet and the same cached base revision. They save validation scores in `results/finetuning/chronos2/<run-id>/run.json`. The custom path saves `adapter.safetensors`; the official path saves the standard PEFT files in `finetuned-ckpt/`. `load_lora_run()` reloads either format onto the recorded base revision. The official path passed a three-step smoke test. The full 2025 backtest integration is a follow-up.
@@ -35,13 +35,13 @@ From the project root, use PowerShell with the project environment active.
 
 ```powershell
 # Train a small adapter on CPU to check the full training and save path.
-python train_chronos2.py --run-id smoke --device cpu --steps 3 --batch-size 1
+python -m tuning.train_chronos2 --run-id smoke --device cpu --steps 3 --batch-size 1
 
 # Check that the saved adapter reloads and forecasts on a short December validation range.
 python main.py --chronos-lora-checkpoint results/finetuning/chronos2/smoke/finetuned-ckpt --test-start 2024-12-10 --test-end 2024-12-14
 
 # Train the first candidate on a CUDA machine.
-python train_chronos2.py --run-id wind-r8-seed42 --device cuda --steps 200 --batch-size 8
+python -m tuning.train_chronos2 --run-id wind-r8-seed42 --device cuda --steps 200 --batch-size 8
 
 # Compare both model variants with one contiguous context setting on December.
 python main.py --chronos-lora-checkpoint results/finetuning/chronos2/wind-r8-seed42/finetuned-ckpt --context-steps 672 --test-start 2024-12-01 --test-end 2024-12-30
@@ -50,7 +50,7 @@ python main.py --chronos-lora-checkpoint results/finetuning/chronos2/wind-r8-see
 python main.py --chronos-lora-checkpoint results/finetuning/chronos2/wind-r8-seed42/finetuned-ckpt --context-steps 672
 ```
 
-`train_chronos2.py` takes a unique `--run-id`, `--device auto|cpu|cuda`, `--steps`, `--batch-size`, `--rank`, `--learning-rate`, and `--seed`. Start with rank 8, learning rate `1e-5`, seed 42, 200 steps, and batch size 8. Treat these as initial settings to validate. In Chronos, batch size counts variates across tasks. With a single target and zero covariates, this is the number of windows per batch.
+`tuning/train_chronos2.py` takes a unique `--run-id`, `--device auto|cpu|cuda`, `--steps`, `--batch-size`, `--rank`, `--learning-rate`, and `--seed`. Start with rank 8, learning rate `1e-5`, seed 42, 200 steps, and batch size 8. Treat these as initial settings to validate. In Chronos, batch size counts variates across tasks. With a single target and zero covariates, this is the number of windows per batch.
 
 `main.py --chronos-lora-checkpoint` selects the explicit model list `chronos2`, `chronos2_lora`, and optionally `persistence` via `--include-persistence`. It uses `covariates=[]` for both Chronos variants. `--context-steps` controls the existing contiguous-history policy at evaluation and defaults to `config.BACKTEST_CONTEXT_STEPS`. The values in the commands above are examples. In this mode, date overrides select forecast issue times in UTC, with the end exclusive. The default `python main.py` and its existing `--reuse` workflow continue to use `config.BACKTEST_MODELS`. In checkpoint mode, `--reuse` looks up the matching comparison and rebuilds it if it is missing.
 
@@ -72,7 +72,7 @@ Keep the reference lengths in training configuration, independent of `BACKTEST_C
 
 ## 3. Implement standalone training
 
-1. Add `train_chronos2.py` at the root, next to `main.py`. Keep its imports to the dataset, shared forecast/request helpers, and Chronos training dependencies. The trainer should never call `run_backtest()` or read `BACKTEST_MODELS`.
+1. Add `tuning/train_chronos2.py` in the tuning package. Keep its imports to the dataset, shared forecast/request helpers, and Chronos training dependencies. The trainer should never call `run_backtest()` or read `BACKTEST_MODELS`.
 2. Add a `chronos-lora` project extra in `pyproject.toml` and update `uv.lock` so `uv sync --extra chronos-lora` installs the tuning dependencies. Use the PEFT compatibility range declared by the installed Chronos release as the starting point (`peft>=0.18.1,<1`) and verify it with the resolved Transformers version. `shapely` is already declared by the project, so syncing the project also restores it if missing locally. Check that PEFT imports successfully before creating a training run. Chronos 2.3.2 otherwise falls back to full fine-tuning when PEFT is missing.
 3. Load the base checkpoint from `config.MODELS_REGISTRY["chronos2"]["checkpoint"]` with `Chronos2Pipeline.from_pretrained()`. Record the resolved base revision. The local cache currently has `29ec3766d36d6f73f0696f85560a422f50e8498c`. Preflight the requested device and report the selected device. A requested unavailable `cuda` should fail before loading the weights.
 4. Call native `fit()` with the prebuilt training and validation windows, `finetune_mode="lora"`, and `prediction_length=156`. For the installed Chronos sampler, left-pad each context with `NaN` to the largest reference length and append the 156 labels. Set both `min_past` and `context_length` to that largest length. Each array then has a single possible split point, and Chronos's observation mask preserves the actual number of observed history steps. Check all four observed lengths with a dataset batch before running the optimizer. Pass an explicit LoRA config with the requested rank, `lora_alpha=2*rank`, and Chronos's default projection targets (`self_attention.q`, `.k`, `.v`, `.o`, and `output_patch_embedding.output_layer`). Set seed, logging cadence, and matching save/evaluation steps through the trainer arguments. Use a short cadence for the smoke test and checkpoint selection by validation loss for the full run. On CPU use float32 and `adamw_torch` to keep the smoke test independent of fused CUDA kernels.

@@ -82,9 +82,9 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         if not files:
             raise ValueError(f"Adapter files missing: {artifact}")
         if family == "chronos2":
-            from train_chronos2 import load_lora_run
+            from tuning.train_chronos2 import load_lora_run
         else:
-            from train_timestral import load_lora_run
+            from tuning.train_timestral import load_lora_run
         from src.models_tsfm import default_device
         device = settings.device or default_device()
         start = time.perf_counter()

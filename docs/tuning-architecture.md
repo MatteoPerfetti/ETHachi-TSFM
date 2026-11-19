@@ -8,14 +8,14 @@ The standalone Timestral trainer uses the same wind windows and December validat
 
 ```powershell
 $runId = "wind-3d-timestral-" + (Get-Date -Format "yyyyMMdd-HHmmss")
-.\.venv\Scripts\python.exe .\train_timestral.py --run-id $runId --context-days 3 --device cpu --steps 200 --batch-size 8
+.\.venv\Scripts\python.exe -m tuning.train_timestral --run-id $runId --context-days 3 --device cpu --steps 200 --batch-size 8
 ```
 
 Timestral has 32-step patches and uses the model's advancing normalization frames for forecast labels. Its trainer computes pinball loss on the normalized output head before conversion back to MW. Chronos-2 has 16-step patches and provides its own training loss through `fit()`. Use the December RMSE and Winkler80 in MW for comparisons between models. The two training losses use different scales and reductions. Timestral saves the same manifest and standard PEFT files under `results/finetuning/timestral_209m/<run-id>/`. Its trainer currently uses wind generation alone. [TabTune Timestral reference](https://github.com/Lexsi-Labs/TabTune/blob/main/tabtune/models/TimeSeries/timestral.py)
 
 ## 1. Configure a run with Hydra
 
-Add a thin Hydra entry point over the existing `train_chronos2.py` training code. Keep training logic callable from Python. Both the command line and Streamlit should go through the same validation and training path.
+Add a thin Hydra entry point over the existing `tuning/train_chronos2.py` training code. Keep training logic callable from Python. Both the command line and Streamlit should go through the same validation and training path.
 
 | Configuration | Proposed fields | Initial preset |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ Start with Hydra config groups for context and covariates so presets can be comb
 
 ```powershell
 $runId = "wind-3d-peft-" + (Get-Date -Format "yyyyMMdd-HHmmss")
-.\.venv\Scripts\python.exe .\train_chronos2.py --backend peft --run-id $runId --context-days 3 --device cpu --steps 200 --batch-size 8
+.\.venv\Scripts\python.exe -m tuning.train_chronos2 --backend peft --run-id $runId --context-days 3 --device cpu --steps 200 --batch-size 8
 ```
 
 **Proposed Hydra commands** after adding the `experiments.train` entry point:
