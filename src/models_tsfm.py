@@ -1,12 +1,11 @@
+from __future__ import annotations
+
 import time
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-from chronos import BaseChronosPipeline
-from timestral import TimestralForecaster
-from timesfm import TimesFM3Forecaster
 
 import config
 from logger import logger
@@ -35,12 +34,19 @@ class TSFMAdapter(Forecaster):
     model_key: str
     uses_covariates = True
 
-    def __init__(self, device: str | None = None, batch_size: int = TSFM_BATCH_SIZE):
+    def __init__(self, device: str | None = None, batch_size: int = TSFM_BATCH_SIZE,
+                 checkpoint: str | None = None, model: Any = None, name: str | None = None):
         self.device = device or default_device()
         self.batch_size = batch_size
-        checkpoint = config.MODELS_REGISTRY[self.model_key]["checkpoint"]
+        checkpoint = checkpoint or config.MODELS_REGISTRY[self.model_key]["checkpoint"]
+        if name is not None:
+            self.name = name
         start = time.perf_counter()
-        self.model = self._load(checkpoint)
+        self.model = self._load(checkpoint) if model is None else model
+        if model is not None:
+            self.max_context = (model.model_context_length if self.model_key == "chronos2"
+                                else model.max_context if self.model_key == "timestral_209m"
+                                else model.global_context)
         self.load_seconds = time.perf_counter() - start
         self.inference_seconds = 0.0
         logger.info("Loaded %s (%s) on %s in %.1fs, max context %s steps",
@@ -102,6 +108,8 @@ class Chronos2Adapter(TSFMAdapter):
     model_key = "chronos2"
 
     def _load(self, checkpoint: str) -> BaseChronosPipeline:
+        from chronos import BaseChronosPipeline
+
         pipeline = BaseChronosPipeline.from_pretrained(checkpoint, device_map=self.device)
         self.max_context = pipeline.model_context_length
         return pipeline
@@ -139,6 +147,8 @@ class TimestralAdapter(TSFMAdapter):
     model_key = "timestral_209m"
 
     def _load(self, checkpoint: str) -> TimestralForecaster:
+        from timestral import TimestralForecaster
+
         forecaster = TimestralForecaster.from_pretrained(checkpoint, device=self.device)
         self.max_context = forecaster.max_context
         return forecaster
@@ -173,6 +183,8 @@ class TimesFMAdapter(TSFMAdapter):
     model_key = "timesfm3"
 
     def _load(self, checkpoint: str) -> TimesFM3Forecaster:
+        from timesfm import TimesFM3Forecaster
+
         forecaster = TimesFM3Forecaster.from_pretrained(checkpoint, device=self.device)
         self.max_context = forecaster.global_context
         return forecaster

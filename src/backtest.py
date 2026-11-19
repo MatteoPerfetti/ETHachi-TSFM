@@ -8,8 +8,10 @@ on the same days. Metrics are computed afterwards from the saved table (src/metr
 import hashlib
 import json
 import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -20,7 +22,6 @@ from src.dataset import Dataset
 from src.ensembles import DEFAULT_PARAMETERS as ENSEMBLE_PARAMETERS
 from src.ensembles import build_ensemble
 from src.forecast import STEP, Forecaster, ForecastRequest
-from src.models_traditional import load_traditional
 
 
 @dataclass
@@ -37,6 +38,7 @@ class BacktestSettings:
     covariates: list[str] = field(default_factory=lambda: list(config.TSFM_COVARIATES[config.TARGET_SOURCE]))
     traditional_strategy: str = config.TRADITIONAL_STRATEGY
     target_source: str = config.TARGET_SOURCE
+    device: str | None = None
 
     @property
     def run_name(self) -> str:
@@ -58,13 +60,47 @@ class BacktestResult:
     skipped: list[pd.Timestamp]
     timings: dict[str, dict[str, float]]
     model_configs: dict[str, dict] = field(default_factory=dict)
+    dataset_fingerprint: str | None = None
 
 
-def load_forecaster(model_key: str, settings: BacktestSettings) -> Forecaster:
+def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: dict | None = None) -> Forecaster:
     """Create the model registered as `model_key` in config.MODELS_REGISTRY."""
+    if model_key.startswith("lora:"):
+        from src.models_tsfm import TSFM_ADAPTERS
+        from src.tsfm_runs import available_adapters, fingerprint
+
+        records = available_adapters()
+        if model_key not in records:
+            raise ValueError(f"Adapter run is missing or unverified: {model_key}")
+        _, family, run_id = model_key.split(":", 2)
+        record = records[model_key]
+        if settings.target_source != "wind" or record.get("target") != "wind_MW":
+            raise ValueError(f"{model_key} was trained on wind_MW; select the wind target")
+        run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / family / run_id
+        artifact = run_dir / record.get("adapter_path", "finetuned-ckpt" if record.get("backend") == "peft" else "adapter.safetensors")
+        files = [artifact] if artifact.is_file() else sorted(p for p in artifact.rglob("*") if p.is_file())
+        if not files:
+            raise ValueError(f"Adapter files missing: {artifact}")
+        if family == "chronos2":
+            from train_chronos2 import load_lora_run
+        else:
+            from train_timestral import load_lora_run
+        from src.models_tsfm import default_device
+        device = settings.device or default_device()
+        start = time.perf_counter()
+        tuned = load_lora_run(run_dir, device)
+        forecaster = TSFM_ADAPTERS[family](device=device, model=tuned, name=f"{family} LoRA ({run_id})")
+        forecaster.load_seconds = time.perf_counter() - start
+        forecaster.configuration = {"model_key": family, "run_id": run_id,
+            "base_checkpoint": record["base_checkpoint"], "base_revision": record["base_revision"],
+            "adapter_sha256": {str(p.relative_to(run_dir)): fingerprint(p) for p in files},
+            "training": record}
+        return forecaster
     if model_key == "persistence":
         return Persistence(min_context=settings.horizon_steps + settings.latency_steps)
     if model_key in config.TRADITIONAL_MODELS:
+        from src.models_traditional import load_traditional
+
         return load_traditional(
             model_key,
             strategy=settings.traditional_strategy,
@@ -73,9 +109,23 @@ def load_forecaster(model_key: str, settings: BacktestSettings) -> Forecaster:
             issue_time=settings.issue_time,
         )
     if config.MODELS_REGISTRY.get(model_key, {}).get("type") == "tsfm":
-        from src.models_tsfm import load_tsfm
+        from src.models_tsfm import load_tsfm, TSFM_ADAPTERS
 
-        return load_tsfm(model_key)
+        if base_revisions and model_key in base_revisions:
+            from huggingface_hub import snapshot_download
+            revision = base_revisions[model_key]
+            options = {"allow_patterns": ["config.json", "model.safetensors"]} if model_key == "timestral_209m" else {}
+            checkpoint = config.MODELS_REGISTRY[model_key]["checkpoint"]
+            snapshot = snapshot_download(checkpoint, revision=revision, local_files_only=True, **options)
+            forecaster = TSFM_ADAPTERS[model_key](device=settings.device, checkpoint=snapshot)
+            forecaster.configuration = {"model_key": model_key, "base_checkpoint": checkpoint, "base_revision": revision}
+            return forecaster
+
+        forecaster = load_tsfm(model_key, device=settings.device)
+        forecaster.configuration = {"model_key": model_key,
+                                    "base_checkpoint": config.MODELS_REGISTRY[model_key]["checkpoint"],
+                                    "base_revision": None}
+        return forecaster
     raise ValueError(f"Model '{model_key}' is not available in the backtest yet")
 
 
@@ -138,7 +188,20 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
     dependency_keys = config.ENSEMBLE_BASE_MODELS if ensemble_keys else []
     run_keys = list(dict.fromkeys([*requested_base_keys, *dependency_keys]))
 
-    forecasters = [load_forecaster(key, settings) for key in run_keys]
+    from src.tsfm_runs import available_adapters
+    adapter_records = available_adapters() if any(k.startswith("lora:") for k in run_keys) else {}
+    base_revisions = {}
+    for key in run_keys:
+        if not key.startswith("lora:"):
+            continue
+        if key not in adapter_records:
+            raise ValueError(f"Adapter run is missing or unverified: {key}")
+        family = key.split(":", 2)[1]
+        revision = adapter_records[key]["base_revision"]
+        if family in base_revisions and base_revisions[family] != revision and family in run_keys:
+            raise ValueError(f"Cannot pair one {family} zero-shot model with adapters from different base revisions")
+        base_revisions[family] = revision
+    forecasters = [load_forecaster(key, settings, base_revisions) if base_revisions else load_forecaster(key, settings) for key in run_keys]
     forecaster_by_key = dict(zip(run_keys, forecasters))
     context_steps = {f.name: context_steps_for(f, settings) for f in forecasters}
     covariate_contexts = [context_steps[f.name] for f in forecasters if f.uses_covariates and settings.covariates]
@@ -232,17 +295,25 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
         skipped=skipped,
         timings=timings,
         model_configs=model_configs,
+        dataset_fingerprint=hashlib.sha256(
+            pd.util.hash_pandas_object(dataset.target, index=True).values.tobytes()
+            + (pd.util.hash_pandas_object(dataset.weather[settings.covariates], index=True).values.tobytes()
+               if settings.covariates else b"")
+        ).hexdigest(),
     )
 
 
-def save_backtest(result: BacktestResult, directory: Path = config.BACKTEST_RESULTS_DIR) -> Path:
+def save_backtest(result: BacktestResult, directory: Path = config.BACKTEST_RESULTS_DIR, *, preserve_history: bool = False) -> Path:
     """Write <run_name>.parquet (predictions) and <run_name>.json (settings, skipped days, timings).
 
     If the run already exists, the rows of the models in `result` replace theirs and the other models are kept,
     so re-running one model with the same settings does not drop the others.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{result.settings.run_name}.parquet"
+    name = result.settings.run_name
+    if preserve_history:
+        name += "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    path = directory / f"{name}.parquet"
     predictions = result.predictions
     timings = dict(result.timings)
     model_configs = dict(result.model_configs)
@@ -267,9 +338,37 @@ def save_backtest(result: BacktestResult, directory: Path = config.BACKTEST_RESU
         "timings": timings,
         "model_configs": model_configs,
     }
+    if preserve_history:
+        from src.metrics import summary
+        meta["created_at"] = datetime.now(timezone.utc).isoformat()
+        meta["dataset_fingerprint"] = result.dataset_fingerprint
+        meta["scores_all"] = json.loads(summary(predictions, "all").to_json(orient="index"))
     path.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     logger.info("Backtest saved to %s", path)
     return path
+
+
+def run_recorded_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSettings,
+                          directory: Path = config.BACKTEST_RESULTS_DIR) -> Path:
+    """Run a separate evaluation and record completed, failed and interrupted attempts."""
+    from src.tsfm_runs import write_record
+
+    attempt_id = uuid4().hex
+    attempt_path = directory / "backtest_attempts" / f"{attempt_id}.json"
+    attempt = {"attempt_id": attempt_id, "status": "running", "started_at": datetime.now(timezone.utc).isoformat(),
+               "model_keys": model_keys, "settings": asdict(settings)}
+    write_record(attempt_path, attempt)
+    try:
+        result = run_backtest(dataset, model_keys, settings)
+        path = save_backtest(result, directory, preserve_history=True)
+        attempt.update(status="completed", result=path.name, finished_at=datetime.now(timezone.utc).isoformat())
+        write_record(attempt_path, attempt)
+        return path
+    except BaseException as exc:
+        attempt.update(status="failed", error=f"{type(exc).__name__}: {exc}",
+                       finished_at=datetime.now(timezone.utc).isoformat())
+        write_record(attempt_path, attempt)
+        raise
 
 
 def load_backtest(run_name: str, directory: Path = config.BACKTEST_RESULTS_DIR) -> tuple[pd.DataFrame, dict]:

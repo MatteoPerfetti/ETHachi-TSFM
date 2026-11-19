@@ -19,6 +19,7 @@ import config
 from src.forecast import STEP
 from src.metrics import rmse, winkler
 from src.tuning_data import VALIDATION_START, load_windows
+from src.tsfm_runs import finish_training, start_training, write_record
 
 
 BASE_CHECKPOINT = config.MODELS_REGISTRY["chronos2"]["checkpoint"]
@@ -143,6 +144,17 @@ def train_with_peft(pipeline, training, validation, context, horizon, run_dir, a
 
 
 def train(args: argparse.Namespace) -> Path:
+    run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "chronos2" / args.run_id
+    record = start_training(run_dir, "chronos2", args, BASE_CHECKPOINT, BASE_REVISION,
+                            "finetuned-ckpt" if args.backend == "peft" else "adapter.safetensors")
+    try:
+        return _train(args, run_dir, record)
+    except BaseException as exc:
+        finish_training(run_dir, record, "failed", f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
     started = time.perf_counter()
     context = int(pd.Timedelta(days=args.context_days) / STEP)
     horizon = config.BACKTEST_HORIZON_STEPS
@@ -156,9 +168,6 @@ def train(args: argparse.Namespace) -> Path:
     torch.manual_seed(args.seed)
     generator = torch.Generator().manual_seed(args.seed)
 
-    run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "chronos2" / args.run_id
-    if run_dir.exists():
-        raise FileExistsError(f"Run already exists: {run_dir}")
     training, validation, origins = load_windows(context, horizon)
     pipeline = load_base(device)
     if context > pipeline.model_context_length:
@@ -167,7 +176,7 @@ def train(args: argparse.Namespace) -> Path:
     print(f"{len(training):,} training windows, {len(validation)} validation origins, "
           f"{context} context steps, {horizon} forecast steps, {device}", flush=True)
     print(f"Zero-shot validation: {baseline}", flush=True)
-    metadata = {"base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
+    metadata = {**record, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
                 "backend": args.backend, "target": "wind_MW", "context_steps": context,
                 "horizon_steps": horizon, "train_start": config.TRAIN_START,
                 "validation_start": VALIDATION_START.isoformat(),
@@ -175,20 +184,24 @@ def train(args: argparse.Namespace) -> Path:
                 "validation_origins": [origin.isoformat() for origin in origins],
                 "rank": args.rank, "alpha": 2 * args.rank, "seed": args.seed,
                 "steps": args.steps, "batch_size": args.batch_size, "learning_rate": args.learning_rate,
-                "device": device, "zero_shot": baseline}
+                "device": device, "zero_shot": baseline, "training_window_count": len(training),
+                "target_modules": list(TARGET_MODULES), "issue_time_utc": config.BACKTEST_ISSUE_TIME,
+                "latency_steps": 0, "optimizer": "AdamW", "weight_decay": 0.0,
+                "validation_interval_steps": min(50, args.steps) if args.backend == "peft" else 50}
     if args.backend == "peft":
-        run_dir.mkdir(parents=True, exist_ok=False)
         best, history = train_with_peft(pipeline, training, validation, context, horizon, run_dir, args)
     else:
         best, history = train_custom(pipeline, training, validation, context, run_dir, args, generator)
 
     metadata.update(best=best, validation_history=history)
     manifest = run_dir / "run.json"
-    manifest.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    record.update(metadata)
+    write_record(manifest, record)
     reloaded = evaluate(load_lora_run(run_dir, device), validation, context, args.batch_size)
     np.testing.assert_allclose(list(reloaded.values()), [best[key] for key in reloaded], rtol=1e-5, atol=1e-5)
     metadata.update(reloaded_validation=reloaded, elapsed_seconds=time.perf_counter() - started)
-    manifest.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    record.update(metadata)
+    finish_training(run_dir, record, "completed")
     return run_dir
 
 
@@ -219,7 +232,6 @@ def train_custom(pipeline, training, validation, context, run_dir, args, generat
 
     if best is None or best_weights is None:
         raise RuntimeError("Training finished without a validated checkpoint")
-    run_dir.mkdir(parents=True, exist_ok=False)
     save_file(best_weights, run_dir / "adapter.safetensors")
     return best, history
 

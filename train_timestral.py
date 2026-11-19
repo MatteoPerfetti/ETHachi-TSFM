@@ -19,6 +19,7 @@ import config
 from src.forecast import STEP
 from src.metrics import rmse, winkler
 from src.tuning_data import VALIDATION_START, load_windows
+from src.tsfm_runs import finish_training, start_training, write_record
 
 
 BASE_CHECKPOINT = config.MODELS_REGISTRY["timestral_209m"]["checkpoint"]
@@ -97,6 +98,16 @@ def evaluate(forecaster: TimestralForecaster, windows: torch.Tensor, context: in
 
 
 def train(args: argparse.Namespace) -> Path:
+    run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "timestral_209m" / args.run_id
+    record = start_training(run_dir, "timestral_209m", args, BASE_CHECKPOINT, BASE_REVISION, "finetuned-ckpt")
+    try:
+        return _train(args, run_dir, record)
+    except BaseException as exc:
+        finish_training(run_dir, record, "failed", f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     start = time.perf_counter()
     device = args.device
     if device == "auto":
@@ -109,9 +120,6 @@ def train(args: argparse.Namespace) -> Path:
         raise ValueError("This training split assumes zero forecast latency")
     context = int(pd.Timedelta(days=args.context_days) / STEP)
     horizon = config.BACKTEST_HORIZON_STEPS
-    run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "timestral_209m" / args.run_id
-    if run_dir.exists():
-        raise FileExistsError(f"Run already exists: {run_dir}")
 
     torch.manual_seed(args.seed)
     windows, validation, origins = load_windows(context, horizon)
@@ -144,7 +152,6 @@ def train(args: argparse.Namespace) -> Path:
           f"{context} context steps, {horizon} forecast steps, {device}", flush=True)
     print(f"Zero-shot validation: {baseline}", flush=True)
 
-    run_dir.mkdir(parents=True, exist_ok=False)
     checkpoint = run_dir / "finetuned-ckpt"
     best, history, bad_evaluations = None, [], 0
     for step in range(1, args.steps + 1):
@@ -176,7 +183,7 @@ def train(args: argparse.Namespace) -> Path:
                 print(f"Early stopping after {bad_evaluations} evaluations without improvement", flush=True)
                 break
 
-    record = {**vars(args), "device": device, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
+    record = {**run_record, **vars(args), "device": device, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
               "backend": "peft", "target": "wind_MW", "covariates": [], "context_steps": context,
               "horizon_steps": horizon, "issue_time_utc": config.BACKTEST_ISSUE_TIME,
               "train_start": config.TRAIN_START, "validation_start": VALIDATION_START.isoformat(),
@@ -184,13 +191,17 @@ def train(args: argparse.Namespace) -> Path:
               "validation_origins": [origin.isoformat() for origin in origins],
               "alpha": 2 * args.rank, "target_modules": list(targets),
               "trainable_parameters": sum(param.numel() for param in trainable),
+              "training_window_count": len(windows), "latency_steps": 0, "optimizer": "AdamW",
+              "validation_interval_steps": 50,
               "zero_shot": baseline, "best": best, "validation_history": history}
     manifest = run_dir / "run.json"
-    manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    run_record.update(record)
+    write_record(manifest, run_record)
     reloaded = evaluate(load_lora_run(run_dir, device), validation, context, args.batch_size)
     np.testing.assert_allclose(list(reloaded.values()), [best[key] for key in reloaded], rtol=1e-5, atol=1e-5)
     record.update(reloaded_validation=reloaded, elapsed_seconds=time.perf_counter() - start)
-    manifest.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    run_record.update(record)
+    finish_training(run_dir, run_record, "completed")
     return run_dir
 
 

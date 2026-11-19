@@ -6,16 +6,18 @@ Saved runs are read from results/ (written by main.py or by the form in the side
 to look at them. Defaults come from config.py.
 """
 import matplotlib.pyplot as plt
+import json
 import pandas as pd
 import streamlit as st
 
 import config
-from src.backtest import BacktestSettings, load_backtest, run_backtest, save_backtest, saved_runs
+from src.backtest import BacktestSettings, load_backtest, run_recorded_backtest, saved_runs
 from src.dataset import load_dataset
 from src.feature_selection import load_selection, run_tree_selection, save_selection, tsfm_covariates
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
 from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
 from src.validate_config import validate_config
+from src.tsfm_runs import available_adapters, training_records
 
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
 # Charts use theme=None: our colors and legend layout (src/plotter.py) instead of Streamlit's chart theme
@@ -104,9 +106,20 @@ def new_backtest_form(expanded: bool) -> None:
         sources = list(config.ELIA_SOURCES)
         target = st.selectbox("Target source", sources, index=sources.index(config.TARGET_SOURCE))
         dataset = get_dataset(target)
+        adapters = available_adapters() if target == "wind" else {}
+        def model_label(key: str) -> str:
+            if key not in adapters:
+                return config.MODELS_REGISTRY[key].get("name", key)
+            record = adapters[key]
+            _, family, run_id = key.split(":", 2)
+            return (f"{family} LoRA — {run_id} (context {record.get('context_steps', '?')}, "
+                    f"steps {record.get('steps', '?')}, rank {record.get('rank', '?')})")
         with st.form("new_backtest"):
-            models = st.multiselect("Models", RUNNABLE_MODELS,
-                                    default=[m for m in config.BACKTEST_MODELS if m in RUNNABLE_MODELS])
+            models = st.multiselect("Models and saved adapters", [*RUNNABLE_MODELS, *adapters],
+                                    default=[m for m in config.BACKTEST_MODELS if m in RUNNABLE_MODELS],
+                                    format_func=model_label)
+            start_date = st.date_input("First issue date (UTC)", value=pd.Timestamp(config.TEST_START).date())
+            end_date = st.date_input("Last issue date (UTC, included)", value=pd.Timestamp(config.TEST_END).date())
             context = st.number_input("Context [15 min steps]", min_value=1, max_value=30000,
                                       value=config.BACKTEST_CONTEXT_STEPS, step=96)
             horizon = st.number_input("Horizon [steps]", min_value=1, max_value=1000,
@@ -132,18 +145,23 @@ def new_backtest_form(expanded: bool) -> None:
                                         default=[c for c in default if c in dataset.weather.columns],
                                         key=f"covariates_{target}")
             submitted = st.form_submit_button("Run backtest", type="primary")
-        st.caption("A full year takes minutes per TSFM on CPU. Re-running a model with the same settings "
-                   "replaces only its forecasts in the saved run.")
+        st.caption("Each backtest is saved separately. Training does not start a backtest automatically. "
+                   "Use validation dates to compare settings; reserve the 2025 holdout for the final comparison.")
     if submitted:
         if not models:
             st.sidebar.error("Choose at least one model.")
             return
-        settings = BacktestSettings(context_steps=int(context), horizon_steps=int(horizon),
+        if start_date > end_date:
+            st.sidebar.error("The first issue date must not be after the last issue date.")
+            return
+        settings = BacktestSettings(test_start=pd.Timestamp(start_date, tz="UTC").isoformat(),
+                                    test_end=(pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)).isoformat(),
+                                    context_steps=int(context), horizon_steps=int(horizon),
                                     latency_steps=int(latency), covariates=covariates,
                                     traditional_strategy=traditional_strategy, target_source=target)
         with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
-            save_backtest(run_backtest(dataset, models, settings))
-        st.session_state["run"] = settings.run_name
+            path = run_recorded_backtest(dataset, models, settings)
+        st.session_state["run"] = path.stem
         st.rerun()
 
 
@@ -170,6 +188,107 @@ def run_caption(meta: dict) -> str:
     if ensembles:
         caption += "  \nEnsembles: " + ", ".join(ensembles)
     return caption
+
+
+def collect_results(runs: dict[str, dict]) -> tuple[list[dict], set[str]]:
+    """Collect scored models from current and earlier standalone evaluations."""
+    rows, evaluated = [], set()
+    for name, meta in runs.items():
+        scores = meta.get("scores_all")
+        if scores is None:
+            try:
+                scores = summary(load_backtest(name)[0], "all").to_dict(orient="index")
+            except (OSError, ValueError, KeyError):
+                continue
+        settings = meta.get("settings", {})
+        for model, score in scores.items():
+            cfg = meta.get("model_configs", {}).get(model, {})
+            if cfg.get("run_id"):
+                evaluated.add(f"lora:{cfg.get('model_key')}:{cfg['run_id']}")
+            rows.append({"Evaluation": name, "Model": model, "Training run": cfg.get("run_id"),
+                         "Target": meta.get("target", settings.get("target_source", "unknown")),
+                         "Start UTC": settings.get("test_start"), "End UTC (exclusive)": settings.get("test_end"),
+                         "Issue UTC": settings.get("issue_time"), "Context": settings.get("context_steps"),
+                         "Horizon": settings.get("horizon_steps"), "Latency": settings.get("latency_steps"),
+                         "Covariates": ", ".join(settings.get("covariates", [])) or "none",
+                         "RMSE [MW]": score.get("RMSE"), "Winkler80 [MW]": score.get("Winkler80"),
+                         "Origins": score.get("days")})
+    for path in (config.BACKTEST_RESULTS_DIR / "tsfm_evaluations").glob("*/run.json"):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            settings = meta.get("settings", {})
+            run_id, family = settings.get("adapter_run_id"), settings.get("model")
+            if run_id and meta.get("status") == "completed":
+                evaluated.add(f"lora:{family}:{run_id}")
+            for model, score in meta.get("scores", {}).items():
+                rows.append({"Evaluation": path.parent.name, "Model": model, "Training run": run_id if "LoRA" in model else None,
+                             "Target": "wind", "Start UTC": settings.get("start"),
+                             "End UTC (exclusive)": settings.get("end_exclusive"), "Issue UTC": settings.get("issue_time_utc"),
+                             "Context": settings.get("context_steps"), "Horizon": settings.get("horizon_steps"),
+                             "Latency": settings.get("latency_steps"), "Covariates": ", ".join(settings.get("covariates", [])) or "none",
+                             "RMSE [MW]": score.get("RMSE"), "Winkler80 [MW]": score.get("Winkler80"), "Origins": score.get("days")})
+        except (OSError, ValueError, TypeError):
+            continue
+    return rows, evaluated
+
+
+def results_overview(rows: list[dict]) -> None:
+    """Show saved model scores together, with evaluation settings for context."""
+    st.subheader("Model results overview")
+    if not rows:
+        st.info("No saved backtest scores yet. Run a backtest to populate this table.")
+        return
+    table = pd.DataFrame(rows)
+    targets = sorted(table["Target"].dropna().unique())
+    target = st.selectbox("Filter results by target", ["All targets", *targets])
+    if target != "All targets":
+        table = table[table["Target"] == target]
+    st.dataframe(table, hide_index=True, width="stretch",
+                 column_order=["Model", "Training run", "RMSE [MW]", "Winkler80 [MW]", "Origins", "Target",
+                               "Start UTC", "End UTC (exclusive)", "Issue UTC", "Context", "Horizon", "Latency",
+                               "Covariates", "Evaluation"],
+                 column_config={"RMSE [MW]": st.column_config.NumberColumn(format="%.1f"),
+                                "Winkler80 [MW]": st.column_config.NumberColumn(format="%.1f")},
+                 alt="Scores for each model and saved evaluation")
+    st.caption("RMSE and Winkler80 are averaged over forecast origins; lower is better. Results from different "
+               "dates, origins, targets or settings are not directly comparable. For a paired comparison, select "
+               "models from the same backtest and verify their inputs.")
+
+
+def experiment_history(evaluated: set[str]) -> None:
+    """List evaluation attempts and the training settings recorded for each adapter."""
+    with st.expander("Training and evaluation history", expanded=False):
+        adapters = training_records()
+        selectable = available_adapters()
+        attempts = []
+        for path in (config.BACKTEST_RESULTS_DIR / "backtest_attempts").glob("*.json"):
+            try:
+                attempt = json.loads(path.read_text(encoding="utf-8"))
+                if attempt.get("status") != "completed":
+                    attempts.append({"Started UTC": attempt.get("started_at"), "Status": attempt.get("status"),
+                                     "Models": ", ".join(attempt.get("model_keys", [])), "Error": attempt.get("error")})
+            except (OSError, ValueError, TypeError):
+                continue
+        if attempts:
+            st.caption("Failed or interrupted backtest attempts")
+            st.dataframe(pd.DataFrame(attempts), hide_index=True, width="stretch",
+                         alt="Failed and interrupted backtest attempts")
+        training_rows = []
+        for key, record in adapters.items():
+            _, family, run_id = key.split(":", 2)
+            training_rows.append({"Model": family, "Run": run_id, "Training context": record.get("context_steps"),
+                                  "Horizon": record.get("horizon_steps"), "Steps": record.get("steps"),
+                                  "Batch size": record.get("batch_size"), "Rank": record.get("rank"),
+                                  "Learning rate": record.get("learning_rate"),
+                                  "Training status": record.get("status", "legacy"),
+                                  "Selectable": key in selectable,
+                                  "Rolling backtest": "Recorded" if key in evaluated else "Not yet recorded"})
+        if training_rows:
+            st.caption("Training runs without a recorded shared backtest can be selected in the sidebar.")
+            st.dataframe(pd.DataFrame(training_rows), hide_index=True, width="stretch",
+                         alt="Training parameters and rolling backtest status")
+            selected = st.selectbox("Training run details", list(adapters), format_func=lambda k: k.replace("lora:", ""))
+            st.json(adapters[selected])
 
 
 def metrics_tab(predictions: pd.DataFrame, models: list[str], window: str, meta: dict) -> None:
@@ -239,6 +358,9 @@ def main() -> None:
 
     runs = saved_runs()
     new_backtest_form(expanded=not runs)
+    result_rows, evaluated = collect_results(runs)
+    results_overview(result_rows)
+    experiment_history(evaluated)
     if not runs:
         st.info("No saved backtest in results/ yet: run one with the form in the sidebar or with `python main.py`.")
         return
@@ -256,6 +378,11 @@ def main() -> None:
                               index=EVAL_WINDOWS.index(config.BACKTEST_EVAL_WINDOW))
     bands = st.sidebar.checkbox("Show q10–q90 bands", value=True)
     st.markdown(run_caption(meta))
+    training_configs = {name: details.get("training") for name, details in meta.get("model_configs", {}).items()
+                        if details.get("training")}
+    if training_configs:
+        with st.expander("Training parameters for this backtest"):
+            st.json(training_configs)
     if not models:
         st.warning("Choose at least one model in the sidebar.")
         return
