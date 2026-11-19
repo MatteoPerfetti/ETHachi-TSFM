@@ -8,11 +8,14 @@ day and the whole next day: 60 + 96 = **156 steps**. The pipeline replays this f
 (rolling-window backtest) and scores each model with **RMSE** (point forecast, q50) and **Winkler score at 80%**
 (interval q10–q90), the two metrics of the Predico forecasting market.
 
-Models so far: **Chronos-2** (Amazon), **Timestral-209M** (Mistral), **TimesFM-3** (Google), five traditional
+Models on this branch: **Chronos-2** (Amazon), **Timestral-209M** (Mistral), **TimesFM-3** (Google), five traditional
 probabilistic benchmarks (**XGBoost, LightGBM, CatBoost, NGBoost, TabNet**), and a **persistence** baseline.
 Traditional models can use either the `origin_aligned` or `fixed_gap` multi-horizon feature layout.
+An earlier zero-shot implementation of **Moirai 1.1-R-Large** is available on the `origin/feature/moirai-1.1-r-large-zero-shot` branch; it has not been integrated into the current branch. See [Model support](#model-support).
 
-## How the pipeline works
+## How the existing benchmark pipeline works
+
+This diagram describes the shared rolling benchmark used by `main.py`, Streamlit and the TSFM evaluation command. Saved TSFM adapters can be selected alongside other models in Streamlit; only selected models and ensemble dependencies run. See [Independent TSFM tuning and evaluation](#independent-tsfm-tuning-and-evaluation).
 
 ```mermaid
 flowchart TD
@@ -87,7 +90,7 @@ Activate the environment:
 source .venv/bin/activate      # Linux/macOS
 ```
 
-The model weights are downloaded from Hugging Face on first use. The DWD file `data/dwd/gen_weather_dwd.parquet`
+The existing benchmark can download model weights from Hugging Face on first use. The independent TSFM trainers and evaluator use locally cached model revisions. The DWD file `data/dwd/gen_weather_dwd.parquet`
 is in the repository; Elia and Open-Meteo data are downloaded on the first run and cached in `data/`.
 
 ### Run the backtest
@@ -103,6 +106,7 @@ skipped days and timings) and a forecast plot in `plots/`.
 python -m streamlit run app.py
 ```
 Opens `http://localhost:8501`. Pick a saved run, the models and the evaluation window in the sidebar, then:
+- **Model results overview**: scores from all saved evaluations in one table, with target, issue dates, context, horizon and covariates; filter by target and check settings before comparing runs.
 - **Metrics**: score table, daily RMSE / Winkler over the year, CSV download, model timings
 - **Forecasts over a period**: D+1 forecasts of consecutive days stitched over a chosen period
 - **Single forecast**: all 156 steps of one issue time
@@ -111,6 +115,15 @@ The sidebar form **Run a new backtest** runs one with chosen models, context, ho
 traditional feature mode. Optuna is deliberately not run by the dashboard: it uses the defaults in `src/MLtrad.py`
 plus optional `TRADITIONAL_MODEL_PARAMETERS` overrides. NGBoost and TabNet can still be slow on a full-year run.
 Use `python -m streamlit` so it runs with the Python that has the models installed.
+
+To compare a saved LoRA run with other models:
+
+1. Choose `wind` as the target, then select the saved adapter and any zero-shot or other models under **Models and saved adapters**. Adapter labels show the run ID, training context, steps and rank.
+2. Choose the first and last issue dates (both included), inference context, horizon and covariates. Choose no weather covariates to match the current wind-only training inputs.
+3. Select **Run backtest**. The selected models are evaluated on the same valid origins; this does not retrain the adapter.
+4. Open **Training and evaluation history** to inspect training-run details, see which runs have a recorded rolling backtest, and compare saved scores. Select a saved backtest in the sidebar to view its metrics and forecasts.
+
+Each dashboard backtest creates a separate result record. Training remains a separate command and does not automatically launch a backtest. Use validation dates for repeated model selection, and reserve the 2025 holdout for a final comparison.
 
 ## Configuration (`config.py`)
 
@@ -123,7 +136,7 @@ Use `python -m streamlit` so it runs with the Python that has the models install
 | `BACKTEST_CONTEXT_STEPS` | `3 * 96` | target history given to the models (15 min steps) |
 | `BACKTEST_LATENCY_STEPS` | `0` | steps between the last available measurement and the issue time |
 | `TSFM_COVARIATES` | DWD wind variables | weather columns given to the TSFMs, per target |
-| `TRADITIONAL_STRATEGY` | `"origin_aligned"` | `origin_aligned` or `fixed_gap` for traditional ML |
+| `TRADITIONAL_STRATEGY` | `"fixed_gap"` | `origin_aligned` or `fixed_gap` for traditional ML |
 | `TRADITIONAL_MODEL_PARAMETERS` | empty overrides | manual/saved parameters merged over the preserved model defaults |
 | `TEST_START` / `TEST_END` | 2025 | issue days of the backtest |
 | `TRAIN_START` / `TRAIN_END` | 2024 | training period passed to `fit` (unused by zero-shot models) |
@@ -133,8 +146,7 @@ Use `python -m streamlit` so it runs with the Python that has the models install
 
 `src/validate_config.py` checks these at start-up and lists every invalid setting.
 
-A run is named after its settings, e.g. `wind_ctx288_h156_lat0_cov7-43744b` = context 288, horizon 156, latency 0,
-7 covariates (+ short hash of their names). Re-running one model with the same settings replaces only its rows.
+The legacy `main.py` run name reflects settings, e.g. `wind_ctx288_h156_lat0_cov7-43744b` = context 288, horizon 156, latency 0, 7 covariates (+ short hash of their names). With that legacy save path, re-running one model with the same name replaces only its rows. Dashboard and standalone TSFM backtests instead use unique filenames to preserve each evaluation.
 
 ## Scripts
 
@@ -151,7 +163,12 @@ A run is named after its settings, e.g. `wind_ctx288_h156_lat0_cov7-43744b` = co
 | **Forecasting pipeline** | |
 | `src/dataset.py` | Adapter between extraction and forecasting: `load_dataset()` returns target and weather on a regular 15 min UTC grid. A new extraction strategy only needs changes here. |
 | `src/forecast.py` | Shared types: `ForecastRequest` (validated inputs of one forecast), `ForecastResult` (q10/q50/q90), `Forecaster` (interface of every model). |
-| `src/models_tsfm.py` | Adapters for Chronos-2, Timestral-209M and TimesFM-3: load weights once, batch requests, pass weather covariates, time inference. `fit` is where fine-tuning will go. |
+| `src/models_tsfm.py` | Inference adapters for Chronos-2, Timestral-209M and TimesFM-3: load weights once, batch requests, pass supported covariates, time inference. Fine-tuning is performed by the standalone trainers. |
+| `train_chronos2.py`, `train_timestral.py` | Independent wind-only LoRA training and adapter reload checks. |
+| `train_moirai.py`, `train_timesfm.py` | Placeholders for future training implementations. |
+| `src/tuning_data.py` | Shared wind-only training and validation windows for the LoRA trainers. |
+| `src/tsfm_runs.py` | Local run manifests, atomic JSON writes and artifact fingerprints. |
+| `evaluate_tsfm.py` | Standalone wind-only command using the shared rolling backtest for one zero-shot TSFM, optionally paired with its LoRA adapter. |
 | `src/models_traditional.py` | Shared-backtest adapter for XGBoost, LightGBM, CatBoost, NGBoost and TabNet; builds either feature mode and returns q10/q50/q90. |
 | `src/MLtrad.py` | Traditional estimators, preserved parameter defaults, quantile prediction, probabilistic scoring, time-based cross-validation and offline Optuna tuning. |
 | `src/baselines.py` | Persistence: repeats the last 156 observed values (q50 only). |
@@ -163,10 +180,7 @@ A run is named after its settings, e.g. `wind_ctx288_h156_lat0_cov7-43744b` = co
 | `src/models.py` | Time-based train/test split and cross-validation, XGBoost regressor. |
 
 ### Adding a model
-Write a class implementing `Forecaster` (`src/forecast.py`): set `name`, `min_context`, `uses_covariates`,
-implement `predict(requests) -> results` (and `fit` if it trains), register it in `MODELS_REGISTRY` and in
-`load_forecaster` (`src/backtest.py`), then add its key to `BACKTEST_MODELS`. The backtest, metrics, plots and
-dashboard pick it up without changes.
+Write a class implementing `Forecaster` (`src/forecast.py`): set `name`, `min_context`, `uses_covariates`, and implement `predict(requests) -> results`. For a TSFM, add its checkpoint to `MODELS_REGISTRY` and its inference adapter to `TSFM_ADAPTERS` in `src/models_tsfm.py`. The existing benchmark can then load it by key. The independent evaluator also needs a compatible cached snapshot and model loader; adapter evaluation additionally requires explicit model-specific loading support. Add a standalone trainer separately if fine-tuning is implemented. Do not add a model to `BACKTEST_MODELS` unless it should run in the default benchmark.
 
 ## Data sources
 
@@ -188,4 +202,131 @@ dashboard pick it up without changes.
 - **D+1 is in UTC days**; Predico probably uses Brussels local days (to be checked).
 - **Data ends 2025-12-31 23:30**, so the forecasts of 30 and 31 December 2025 are skipped.
 - **Next**: validate the traditional benchmarks over the full common test period, persist selected Optuna parameters,
-  fine-tune the TSFMs in `fit`, run context-length sweeps, and study covariate importance.
+  run context-length sweeps and study covariate importance.
+
+# Independent TSFM tuning and evaluation
+
+## Architecture and data flow
+
+Training and evaluation are separate jobs. A trainer selects one model, creates a LoRA adapter and saves a run record. The evaluator later loads a base checkpoint and, optionally, that adapter; it does not retrain during the rolling backtest. Training code and losses remain specific to each model.
+
+```mermaid
+flowchart LR
+    W["Cached Belgian wind<br/>15-minute observations"] --> D["src/tuning_data.py<br/>training and validation windows"]
+    D --> C["train_chronos2.py<br/>custom or PEFT LoRA"]
+    D --> T["train_timestral.py<br/>PEFT LoRA"]
+    C --> R["results/finetuning/model/run-id<br/>run.json + adapter"]
+    T --> R
+    R --> L["model-specific adapter loader<br/>recorded base revision"]
+    W --> E["src/backtest.py<br/>shared rolling requests"]
+    L --> E
+    B["Cached pretrained base<br/>zero-shot"] --> E
+    CLI["evaluate_tsfm.py<br/>standalone command"] --> E
+    UI["app.py<br/>select models and adapters"] --> E
+    E --> M["src/metrics.py<br/>RMSE and Winkler80"]
+    E --> O["results/run-id.json + run-id.parquet"]
+    M --> O
+```
+
+| Component | Current responsibility |
+|---|---|
+| `config.py` | Registry of models and checkpoints, wind source, resolution, issue time, default horizon and data bounds. |
+| `src/tuning_data.py` | Loads the aggregate wind target and builds training and December validation windows shared by both trainers. |
+| `train_chronos2.py` | Trains one Chronos-2 adapter using the custom or PEFT backend; evaluates zero-shot and tuned checkpoints and verifies adapter reload. |
+| `train_timestral.py` | Trains one Timestral-209M PEFT adapter using its normalized quantile loss and advancing frames; supports attention-only or attention-plus-MLP targets and its configurable optimizer schedule. |
+| `src/tsfm_runs.py` | Creates local run records, fingerprints data, captures selected package and Git information, and atomically updates JSON manifests. |
+| `src/models_tsfm.py` and `src/forecast.py` | Model-specific inference adapters and the shared request/result interface. Each TSFM library is imported when its model is loaded. |
+| `src/backtest.py` | Shared rolling evaluation: loads selected models, builds requests for common valid origins, collects forecasts and scores them. A saved adapter is a selectable model variant. |
+| `evaluate_tsfm.py` | Standalone wind-only command that calls the shared backtest with one zero-shot TSFM and optionally its saved adapter. |
+| `src/metrics.py` | Scores q50 RMSE and q10–q90 Winkler80 in MW; the reported score is the mean of the per-origin scores. |
+
+The current standalone trainers use `wind_MW`, aggregated across Belgian regions, with no covariates. Training windows lie in January–November 2024; December 2024 daily origins at 09:00 UTC are used for validation and checkpoint selection. The default context is 288 steps (three days) and the horizon is 156 steps (39 hours). The proposed final holdout is 2025 after model and settings are fixed. Evaluation is rolling: later 2025 origins may use earlier observed 2025 values as history, while adapter weights remain fixed.
+
+The shared backtest builds a contiguous history for each origin. Zero-shot and adapter variants of the same model receive matching requests and use the adapter's recorded base revision. It records and skips origins without complete history or labels. The inference context length is independent of the context used during adapter training. The dashboard can pass its selected weather covariates during inference; the existing LoRA trainers are wind-only, and the standalone `evaluate_tsfm.py` command uses no covariates. Retrieval or RAFT-style context policies and training with covariates are not yet implemented; a non-contiguous context will need a suitable request contract.
+
+### Model support
+
+| Model | Zero-shot evaluation | LoRA training and paired evaluation |
+|---|---|---|
+| Chronos-2 (`amazon/chronos-2`) | Implemented | Implemented; custom and PEFT adapters |
+| Timestral-209M (`mistralai/Timestral-209M`) | Implemented | Implemented; PEFT adapters |
+| TimesFM-3 (`google/timesfm-3.0-pytorch`) | Implemented | Training placeholder only |
+| Moirai 1.1-R-Large (`Salesforce/moirai-1.1-R-large`) | Implemented on `origin/feature/moirai-1.1-r-large-zero-shot`; not integrated into this branch or `evaluate_tsfm.py` | Training placeholder only |
+
+Training losses are model-specific and are not directly comparable across Chronos and Timestral. Compare forecasts on matching origins using metrics in MW. December results used to choose a checkpoint are validation results, not independent holdout evidence.
+
+**Moirai implementation on the feature branch.** Commit `8c865ae` includes `src/moirai_process.py`, `src/moirai_worker.py`, `requirements-moirai.txt`, and corresponding changes to the earlier model runner, registry and Streamlit app. The process bridge passes a target context to a separate Python worker; the worker uses Uni2TS and GluonTS to load `Salesforce/moirai-1.1-R-large` and produce q10, q50 and q90 forecasts. The branch documents a separate `.venv-moirai` (for example Python 3.11), a compatible PyTorch installation, its `requirements-moirai.txt`, and `MOIRAI_PYTHON` pointing to that environment's interpreter. The model checkpoint must also be available to the worker.
+
+Those files and the Moirai registry entry are absent from the current `Chronos-finetuning` branch, and the feature branch uses an older model-runner interface. Bringing the implementation here therefore requires integrating and checking the bridge, worker, dependencies and model interface; simply running the current `evaluate_tsfm.py --model moirai` will not work. The feature-branch code has been inspected but was not executed as part of this documentation update. The `train_moirai.py` in this branch remains a training placeholder.
+
+### Artifacts and run identity
+
+```text
+results/
+  finetuning/<model>/<run-id>/
+    run.json                 # training configuration, status and scores
+    finetuned-ckpt/          # PEFT adapter, when using PEFT
+    adapter.safetensors      # alternative custom Chronos adapter
+  <evaluation-id>.json       # settings, model/training records, scores and skipped origins
+  <evaluation-id>.parquet    # issue time, timestamp, model, quantiles, actual
+  backtest_attempts/         # status and parameters, including failed or interrupted attempts
+  tsfm_evaluations/          # earlier standalone TSFM results, retained for reference
+```
+
+Each new training manifest records its base checkpoint and revision, adapter path, input parameters, dataset path and SHA-256 fingerprint, context, horizon, split, validation origins, scores, selected package versions and Git commit/dirty state. Status is `running`, `completed`, or `failed`; completion follows the adapter reload check. JSON updates are atomic. Existing verified run manifests and the custom Chronos adapter remain readable, although older records can lack newer provenance fields. An interrupted run can remain `running`.
+
+Each new dashboard or standalone TSFM evaluation gets a unique filename so repeated runs remain separate. Its JSON records settings, selected-model metadata, adapter fingerprints and training record, data fingerprint, skipped origins, timings and scores. Valid origins are available in the predictions table. A separate attempt record stores its settings and status, including failures; a process stopped unexpectedly may remain marked `running`. Input validation before the attempt starts is not recorded. The original `main.py` save/reuse behavior remains unchanged. `results/` is Git-ignored; share or back it up separately when needed.
+
+In Streamlit, select a target, models and/or saved LoRA runs, inference settings and issue dates, then start one backtest. The training and evaluation history shows saved settings and scores, including earlier standalone evaluations; new results can also be opened in the existing metrics and forecast views. Training is still started independently, and training runs without a recorded backtest are flagged in the history. The standalone TSFM command reads cached wind directly; neither entry point runs traditional models unless they are selected or needed by a selected ensemble.
+
+## Quick terminal tests
+
+Run these PowerShell commands from the repository root. Each evaluation tests one model on one December 2024 origin using cached wind data, a 288-step context and a 156-step horizon. This short validation-period check verifies the workflow; it is not an independent measure of model performance. The relevant model checkpoint must already be in the Hugging Face cache.
+
+```powershell
+# Chronos-2, zero-shot
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model chronos2 --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
+
+# Timestral-209M, zero-shot
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model timestral_209m --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
+
+# TimesFM-3, zero-shot
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model timesfm3 --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
+```
+
+For a short training and adapter-reload test, run either trainer independently. The timestamp gives each run a new ID; use another ID if the directory already exists.
+
+```powershell
+# Chronos-2 PEFT: three optimizer steps
+$runId = "chronos-smoke-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+.\.venv\Scripts\python.exe train_chronos2.py --backend peft --run-id $runId --steps 3 --batch-size 1 --device cpu
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model chronos2 --adapter-run-id $runId --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
+
+# Timestral-209M PEFT: three optimizer steps
+$runId = "timestral-smoke-" + (Get-Date -Format "yyyyMMdd-HHmmss")
+.\.venv\Scripts\python.exe train_timestral.py --run-id $runId --steps 3 --batch-size 1 --device cpu
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model timestral_209m --adapter-run-id $runId --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
+```
+
+The adapter commands compare zero-shot and the newly trained adapter on the same origin. `train_moirai.py` and `train_timesfm.py` are placeholders. Moirai zero-shot code exists on the feature branch described above but is not available in this branch's evaluator; Moirai and TimesFM training are not implemented here.
+
+## Full training and evaluation
+
+The standalone trainers use cached Belgian wind generation, without covariates. They never train XGBoost. Use a new ID for each training run:
+
+```powershell
+.\.venv\Scripts\python.exe train_chronos2.py --backend peft --run-id chronos-example --steps 200 --device cpu
+.\.venv\Scripts\python.exe train_timestral.py --run-id timestral-example --steps 200 --device cpu
+```
+
+New runs under `results/finetuning/<model>/<run-id>/` record arguments, data fingerprint, base revision, split, scores, adapter path and reload verification. `run.json` has a status; only a completed run with a reload check can be evaluated. Existing verified run records and both Chronos adapter formats remain supported. A run interrupted before completion may remain `running` and must not be reused.
+
+Evaluate one model, or compare its base and adapter on the same origins:
+
+```powershell
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model chronos2 --adapter-run-id chronos-example --start 2025-01-01T00:00:00Z --end 2026-01-01T00:00:00Z
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model timestral_209m --adapter-run-id timestral-example --context-steps 672
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model timesfm3
+```
+
+Dates bound issue times with an exclusive end. The default is 09:00 UTC, zero latency, a 156-step horizon and 288 contiguous history steps. Inference context is independent of training. For adapter comparisons the exact base revision must already be cached. The command saves a unique JSON/Parquet pair directly under `results/` and does not reuse old results. Origins with incomplete history or labels are skipped, including the end of 2025 if the dataset has no later labels. This command is wind-only.
