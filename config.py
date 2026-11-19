@@ -161,6 +161,7 @@ TREE_SELECTION_CALENDAR = False
 DATA_START = "2023-12-28T00:00:00Z"
 DATA_END = "2025-12-31T23:45:00Z"
 DATA_DIR = Path(__file__).resolve().parent / "data"
+INPUTS_DIR = DATA_DIR / "inputs"
 
 ELIA_SOURCES = {
     "wind": {
@@ -245,8 +246,7 @@ DATA_PV_NUTS_URL = (
 )
 
 # Wind data sample points and spatial weather aggregation.
-WIND_REGION_DIR = DATA_DIR / "wind-region"
-DATA_WIND_FARMS_PATH = DATA_DIR / "wind" / "belgium_wind_farms.csv"
+DATA_WIND_FARMS_PATH = INPUTS_DIR / "belgium_wind_farms.csv"
 DATA_WIND_PRODUCTION_YEAR = 2025
 DATA_WIND_WEATHER_SAMPLES = 50
 DATA_WIND_RANDOM_SEED = 42
