@@ -164,8 +164,8 @@ The legacy `main.py` run name reflects settings, e.g. `wind_ctx288_h156_lat0_cov
 | `src/dataset.py` | Adapter between extraction and forecasting: `load_dataset()` returns target and weather on a regular 15 min UTC grid. A new extraction strategy only needs changes here. |
 | `src/forecast.py` | Shared types: `ForecastRequest` (validated inputs of one forecast), `ForecastResult` (q10/q50/q90), `Forecaster` (interface of every model). |
 | `src/models_tsfm.py` | Inference adapters for Chronos-2, Timestral-209M and TimesFM-3: load weights once, batch requests, pass supported covariates, time inference. Fine-tuning is performed by the standalone trainers. |
-| `train_chronos2.py`, `train_timestral.py` | Independent wind-only LoRA training and adapter reload checks. |
-| `train_moirai.py`, `train_timesfm.py` | Placeholders for future training implementations. |
+| `tuning/train_chronos2.py`, `tuning/train_timestral.py` | Independent wind-only LoRA training and adapter reload checks. |
+| `tuning/train_moirai.py`, `tuning/train_timesfm.py` | Placeholders for future training implementations. |
 | `src/tuning_data.py` | Shared wind-only training and validation windows for the LoRA trainers. |
 | `src/tsfm_runs.py` | Local run manifests, atomic JSON writes and artifact fingerprints. |
 | `evaluate_tsfm.py` | Standalone wind-only command using the shared rolling backtest for one zero-shot TSFM, optionally paired with its LoRA adapter. |
@@ -213,8 +213,8 @@ Training and evaluation are separate jobs. A trainer selects one model, creates 
 ```mermaid
 flowchart LR
     W["Cached Belgian wind<br/>15-minute observations"] --> D["src/tuning_data.py<br/>training and validation windows"]
-    D --> C["train_chronos2.py<br/>custom or PEFT LoRA"]
-    D --> T["train_timestral.py<br/>PEFT LoRA"]
+    D --> C["tuning/train_chronos2.py<br/>custom or PEFT LoRA"]
+    D --> T["tuning/train_timestral.py<br/>PEFT LoRA"]
     C --> R["results/finetuning/model/run-id<br/>run.json + adapter"]
     T --> R
     R --> L["model-specific adapter loader<br/>recorded base revision"]
@@ -232,8 +232,8 @@ flowchart LR
 |---|---|
 | `config.py` | Registry of models and checkpoints, wind source, resolution, issue time, default horizon and data bounds. |
 | `src/tuning_data.py` | Loads the aggregate wind target and builds training and December validation windows shared by both trainers. |
-| `train_chronos2.py` | Trains one Chronos-2 adapter using the custom or PEFT backend; evaluates zero-shot and tuned checkpoints and verifies adapter reload. |
-| `train_timestral.py` | Trains one Timestral-209M PEFT adapter using its normalized quantile loss and advancing frames; supports attention-only or attention-plus-MLP targets and its configurable optimizer schedule. |
+| `tuning/train_chronos2.py` | Trains one Chronos-2 adapter using the custom or PEFT backend; evaluates zero-shot and tuned checkpoints and verifies adapter reload. |
+| `tuning/train_timestral.py` | Trains one Timestral-209M PEFT adapter using its normalized quantile loss and advancing frames; supports attention-only or attention-plus-MLP targets and its configurable optimizer schedule. |
 | `src/tsfm_runs.py` | Creates local run records, fingerprints data, captures selected package and Git information, and atomically updates JSON manifests. |
 | `src/models_tsfm.py` and `src/forecast.py` | Model-specific inference adapters and the shared request/result interface. Each TSFM library is imported when its model is loaded. |
 | `src/backtest.py` | Shared rolling evaluation: loads selected models, builds requests for common valid origins, collects forecasts and scores them. A saved adapter is a selectable model variant. |
@@ -257,7 +257,7 @@ Training losses are model-specific and are not directly comparable across Chrono
 
 **Moirai implementation on the feature branch.** Commit `8c865ae` includes `src/moirai_process.py`, `src/moirai_worker.py`, `requirements-moirai.txt`, and corresponding changes to the earlier model runner, registry and Streamlit app. The process bridge passes a target context to a separate Python worker; the worker uses Uni2TS and GluonTS to load `Salesforce/moirai-1.1-R-large` and produce q10, q50 and q90 forecasts. The branch documents a separate `.venv-moirai` (for example Python 3.11), a compatible PyTorch installation, its `requirements-moirai.txt`, and `MOIRAI_PYTHON` pointing to that environment's interpreter. The model checkpoint must also be available to the worker.
 
-Those files and the Moirai registry entry are absent from the current `Chronos-finetuning` branch, and the feature branch uses an older model-runner interface. Bringing the implementation here therefore requires integrating and checking the bridge, worker, dependencies and model interface; simply running the current `evaluate_tsfm.py --model moirai` will not work. The feature-branch code has been inspected but was not executed as part of this documentation update. The `train_moirai.py` in this branch remains a training placeholder.
+Those files and the Moirai registry entry are absent from the current `Chronos-finetuning` branch, and the feature branch uses an older model-runner interface. Bringing the implementation here therefore requires integrating and checking the bridge, worker, dependencies and model interface; simply running the current `evaluate_tsfm.py --model moirai` will not work. The feature-branch code has been inspected but was not executed as part of this documentation update. The `tuning/train_moirai.py` in this branch remains a training placeholder.
 
 ### Artifacts and run identity
 
@@ -299,24 +299,24 @@ For a short training and adapter-reload test, run either trainer independently. 
 ```powershell
 # Chronos-2 PEFT: three optimizer steps
 $runId = "chronos-smoke-" + (Get-Date -Format "yyyyMMdd-HHmmss")
-.\.venv\Scripts\python.exe train_chronos2.py --backend peft --run-id $runId --steps 3 --batch-size 1 --device cpu
+.\.venv\Scripts\python.exe -m tuning.train_chronos2 --backend peft --run-id $runId --steps 3 --batch-size 1 --device cpu
 .\.venv\Scripts\python.exe evaluate_tsfm.py --model chronos2 --adapter-run-id $runId --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
 
 # Timestral-209M PEFT: three optimizer steps
 $runId = "timestral-smoke-" + (Get-Date -Format "yyyyMMdd-HHmmss")
-.\.venv\Scripts\python.exe train_timestral.py --run-id $runId --steps 3 --batch-size 1 --device cpu
+.\.venv\Scripts\python.exe -m tuning.train_timestral --run-id $runId --steps 3 --batch-size 1 --device cpu
 .\.venv\Scripts\python.exe evaluate_tsfm.py --model timestral_209m --adapter-run-id $runId --start 2024-12-10T00:00:00Z --end 2024-12-11T00:00:00Z --device cpu
 ```
 
-The adapter commands compare zero-shot and the newly trained adapter on the same origin. `train_moirai.py` and `train_timesfm.py` are placeholders. Moirai zero-shot code exists on the feature branch described above but is not available in this branch's evaluator; Moirai and TimesFM training are not implemented here.
+The adapter commands compare zero-shot and the newly trained adapter on the same origin. `tuning/train_moirai.py` and `tuning/train_timesfm.py` are placeholders. Moirai zero-shot code exists on the feature branch described above but is not available in this branch's evaluator; Moirai and TimesFM training are not implemented here.
 
 ## Full training and evaluation
 
 The standalone trainers use cached Belgian wind generation, without covariates. They never train XGBoost. Use a new ID for each training run:
 
 ```powershell
-.\.venv\Scripts\python.exe train_chronos2.py --backend peft --run-id chronos-example --steps 200 --device cpu
-.\.venv\Scripts\python.exe train_timestral.py --run-id timestral-example --steps 200 --device cpu
+.\.venv\Scripts\python.exe -m tuning.train_chronos2 --backend peft --run-id chronos-example --steps 200 --device cpu
+.\.venv\Scripts\python.exe -m tuning.train_timestral --run-id timestral-example --steps 200 --device cpu
 ```
 
 New runs under `results/finetuning/<model>/<run-id>/` record arguments, data fingerprint, base revision, split, scores, adapter path and reload verification. `run.json` has a status; only a completed run with a reload check can be evaluated. Existing verified run records and both Chronos adapter formats remain supported. A run interrupted before completion may remain `running` and must not be reused.
