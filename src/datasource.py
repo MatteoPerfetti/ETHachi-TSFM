@@ -10,8 +10,8 @@ from shapely import contains_xy
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
-from config import (DATA_DIR, SOLAR_REGION_DIR, DATA_PV_NUTS, DATA_PV_PRODUCTION_YEAR, DATA_PV_RANDOM_SEED, DATA_PV_REGIONS,
-                    DATA_PV_WEATHER_SAMPLES, RESOLUTIONCODE, STATISTICAL_PROPERTIES, ELIA_SOURCES, WIND_REGION_DIR,
+from config import (DATA_DIR, INPUTS_DIR, SOLAR_REGION_DIR, DATA_PV_NUTS, DATA_PV_PRODUCTION_YEAR, DATA_PV_RANDOM_SEED, DATA_PV_REGIONS,
+                    DATA_PV_WEATHER_SAMPLES, RESOLUTIONCODE, STATISTICAL_PROPERTIES, ELIA_SOURCES,
                     DATA_WIND_FARMS_PATH, DATA_WIND_PRODUCTION_YEAR, DATA_WIND_WEATHER_SAMPLES, DATA_WIND_RANDOM_SEED)
 from logger import logger
 from src.http_client import HttpClient, HttpError
@@ -111,7 +111,7 @@ def load_region_probabilities(name: str, client: HttpClient, regions: list[str],
         production = fetch_elia_production(client, regions, start, end, resolutioncode)
         return pd.DataFrame({"production_mwh": production, "share": production / production.sum()}).rename_axis("region")
 
-    df = cached(f"{name} region production shares {year}", directory / f"production_share_{year}.csv", compute,
+    df = cached(f"{name} region production shares {year}", directory / f"production_share_{name}_{year}.csv", compute,
                 read=lambda path: pd.read_csv(path, index_col="region"), write=pd.DataFrame.to_csv,
                 valid=lambda df: set(regions) <= set(df.index))
     share = df.loc[regions, "share"]
@@ -306,8 +306,8 @@ def generate_pv_weather_samples(elia_client: HttpClient, nuts_client: HttpClient
 
     elia_client is bound to the Elia solar dataset, nuts_client to DATA_PV_NUTS_URL.
     """
-    probabilities = load_region_probabilities("PV", elia_client, regions, DATA_PV_PRODUCTION_YEAR, RESOLUTIONCODE,
-                                              SOLAR_REGION_DIR)
+    probabilities = load_region_probabilities("solar", elia_client, regions, DATA_PV_PRODUCTION_YEAR, RESOLUTIONCODE,
+                                              INPUTS_DIR)
     geometries = load_nuts_geometries(nuts_client, {region: DATA_PV_NUTS[region] for region in regions})
     return sample_points(probabilities, lambda region, n, rng: sample_points_in(geometries[region], n, rng),
                          n_samples, seed)
@@ -330,6 +330,6 @@ def generate_wind_weather_samples(elia_client: HttpClient, regions: list[str] = 
     """Return n_samples random weather sample points (latitude, longitude, region) at wind farm locations,
     spread over the regions in proportion to their wind production. elia_client is bound to the Elia wind dataset."""
     probabilities = load_region_probabilities("wind", elia_client, regions, DATA_WIND_PRODUCTION_YEAR, RESOLUTIONCODE,
-                                              WIND_REGION_DIR)
+                                              INPUTS_DIR)
     farms = pd.read_csv(DATA_WIND_FARMS_PATH, sep=";")
     return sample_points(probabilities, wind_farm_sampler(farms), n_samples, seed)

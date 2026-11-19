@@ -2,10 +2,16 @@ __pycache__/
 .venv/
 .venv314/
 claude/
-data/
+# data/
+data/cache/
+data/features/
 data/solar/
-data/wind/
+data/solar-region/
+data/target/
 data/weather/
+data/weather-region/
+data/wind/
+data/wind-region/
 plots/
 results/
 
