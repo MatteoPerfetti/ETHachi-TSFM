@@ -1,10 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock, local
 import json
 import shutil
 import time
 
 import pandas as pd
 import numpy as np
+import requests
 from shapely import contains_xy
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
@@ -306,3 +309,132 @@ def load_pv_weather_statistics(name: str, client: HttpClient, points: pd.DataFra
     stats.to_parquet(path)
     logger.info("Cached %s statistics (%d rows) to %s", name, len(stats), path)
     return stats
+
+# Issue-time weather archive for RAFT
+
+def load_raft_weather_archive(path: str | Path, columns: list[str]) -> pd.DataFrame:
+    """Load RAFT's hourly forecast vintages, indexed by issue time and valid time."""
+    archive = pd.read_parquet(path)
+    dates = ["issue_time", "timestamp"]
+    missing = set(dates + columns) - set(archive.columns)
+    if missing:
+        raise ValueError(f"RAFT weather archive is missing columns: {sorted(missing)}")
+    archive[dates] = archive[dates].apply(pd.to_datetime, utc=True)
+    if archive[dates].isna().any().any() or archive.duplicated(dates).any():
+        raise ValueError("RAFT weather archive requires unique, non-missing issue_time and timestamp pairs")
+    return archive.set_index(dates).sort_index()
+
+
+_RAFT_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
+_RAFT_POINTS = ((51.05, 3.72), (50.47, 4.87), (51.65, 2.85))
+_RAFT_CAPACITY = (1819.64, 1357.44, 2262.10)  # Elia 2024 regional capacity weights
+_RAFT_SPEEDS = ("wind_speed_10m", "wind_speed_80m", "wind_speed_120m", "wind_speed_180m", "wind_gusts_10m")
+_RAFT_DIRECTION = "wind_direction_120m"
+_RAFT_MODEL = "ecmwf_ifs"
+
+
+class _RaftWeatherDownloader:
+    def __init__(self, cache):
+        self.cache = cache
+        cache.mkdir(parents=True, exist_ok=True)
+        self.lock = Lock()
+        self.next_request = 0.0
+        self.thread = local()
+
+    def fetch(self, run):
+        path = self.cache / f"{run:%Y%m%dT%H}.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        if not hasattr(self.thread, "session"):
+            self.thread.session = requests.Session()
+        for attempt in range(4):
+            while True:
+                with self.lock:
+                    now = time.monotonic()
+                    wait = self.next_request - now
+                    if wait <= 0:
+                        self.next_request = now + 0.90
+                        break
+                time.sleep(wait)
+            try:
+                response = self.thread.session.get(_RAFT_URL, timeout=30, params={
+                    "run": run.strftime("%Y-%m-%dT%H:%M"), "models": _RAFT_MODEL,
+                    "latitude": ",".join(str(point[0]) for point in _RAFT_POINTS),
+                    "longitude": ",".join(str(point[1]) for point in _RAFT_POINTS),
+                    "forecast_hours": 54, "wind_speed_unit": "ms", "cell_selection": "nearest",
+                    "hourly": ",".join((*_RAFT_SPEEDS, _RAFT_DIRECTION)),
+                })
+                if response.status_code == 429:
+                    delay = response.headers.get("Retry-After", "")
+                    with self.lock:
+                        self.next_request = max(self.next_request, time.monotonic() + (
+                            int(delay) if delay.isdigit() else 60
+                        ))
+                if response.status_code >= 400 and response.status_code != 429 and response.status_code < 500:
+                    raise ValueError(f"{run}: HTTP {response.status_code}: {response.text[:250]}")
+                response.raise_for_status()
+                payload = response.json()
+                temp = path.with_suffix(".tmp")
+                temp.write_text(json.dumps(payload), encoding="utf-8")
+                temp.replace(path)
+                return payload
+            except (requests.ConnectionError, requests.Timeout, requests.HTTPError):
+                if attempt == 3:
+                    raise
+                time.sleep(3 * 2 ** attempt)
+
+    def build(self, run, issues):
+        payload = self.fetch(run)
+        if len(payload) != len(_RAFT_POINTS):
+            raise ValueError(f"{run}: expected one response per location")
+        locations = []
+        for location in payload:
+            if any(location["hourly_units"][name] != "m/s" for name in _RAFT_SPEEDS):
+                raise ValueError(f"{run}: expected units of m/s")
+            hourly = pd.DataFrame(location["hourly"])
+            hourly.index = pd.to_datetime(hourly.pop("time"), utc=True)
+            locations.append(hourly)
+        frames = []
+        for issue in issues:
+            index = pd.date_range(issue, periods=39, freq="h", name="timestamp")
+            values = np.stack([hourly.reindex(index)[[*_RAFT_SPEEDS, _RAFT_DIRECTION]].to_numpy(dtype=float) for hourly in locations])
+            if not np.isfinite(values).all():
+                raise ValueError(f"{run}: missing forecast values for {issue}")
+            frame = pd.DataFrame(np.average(values[:, :, :-1], weights=_RAFT_CAPACITY, axis=0),
+                                 index=index, columns=[f"{name}_mean" for name in _RAFT_SPEEDS])
+            angle = np.deg2rad(values[:, :, -1])
+            frame["wind_sin_120m_mean"] = np.average(np.sin(angle), weights=_RAFT_CAPACITY, axis=0)
+            frame["wind_cos_120m_mean"] = np.average(np.cos(angle), weights=_RAFT_CAPACITY, axis=0)
+            frames.append(frame.reset_index().assign(issue_time=issue, run_time=run, weather_model=_RAFT_MODEL))
+        return frames
+
+
+def build_raft_weather_archive(start: str, end: str, output: Path) -> None:
+    """Write the Belgian wind RAFT archive from historical ECMWF runs."""
+    start, end = (pd.Timestamp(value).tz_convert("UTC") for value in (start, end))
+    if start != start.floor("h") or start.hour % 6 != 3 or end < start:
+        raise ValueError("Use an issue interval on the 03/09/15/21 UTC grid.")
+    # The 00/12 UTC forecast is at least 9 hours old at the chosen issuance.
+    by_run = {}
+    for issue in pd.date_range(start, end, freq="6h"):
+        run = (issue - pd.Timedelta(hours=9)).floor("12h")
+        by_run.setdefault(run, []).append(issue)
+    downloader = _RaftWeatherDownloader(output.parent / "ecmwf_ifs_run_cache")
+    frames, missing = [], 0
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        jobs = {run: pool.submit(downloader.build, run, issues) for run, issues in by_run.items()}
+        for i, (run, job) in enumerate(jobs.items(), start=1):
+            try:
+                frames.extend(job.result())
+            except (requests.RequestException, ValueError, KeyError) as error:
+                missing += len(by_run[run])
+                print(f"Skipped {run}: {error}", flush=True)
+            if i % 30 == 0 or i == len(jobs):
+                print(f"Checked {i}/{len(jobs)} archived runs, {len(frames)} usable issues", flush=True)
+    if not frames:
+        raise ValueError("No complete forecasts to write")
+    archive = pd.concat(frames, ignore_index=True)
+    temp = output.with_suffix(".tmp")
+    archive.to_parquet(temp, index=False)
+    temp.replace(output)
+    print(f"Saved {len(frames)} issues to {output}; {missing} unavailable", flush=True)

@@ -20,7 +20,7 @@ from src.dataset import Dataset
 from src.ensembles import DEFAULT_PARAMETERS as ENSEMBLE_PARAMETERS
 from src.ensembles import build_ensemble
 from src.forecast import STEP, Forecaster, ForecastRequest
-from src.models_traditional import load_traditional
+from src.raft import CONTEXT_HOURS, HORIZON_HOURS, STEPS_PER_HOUR, RaftRetriever, RaftSettings
 
 
 @dataclass
@@ -37,6 +37,7 @@ class BacktestSettings:
     covariates: list[str] = field(default_factory=lambda: list(config.TSFM_COVARIATES[config.TARGET_SOURCE]))
     traditional_strategy: str = config.TRADITIONAL_STRATEGY
     target_source: str = config.TARGET_SOURCE
+    raft: RaftSettings | None = None
 
     @property
     def run_name(self) -> str:
@@ -46,8 +47,20 @@ class BacktestSettings:
             covariates = f"cov{len(self.covariates)}-{digest}"
         else:
             covariates = "nocov"
-        return (f"{self.target_source}_ctx{self.context_steps}_h{self.horizon_steps}"
+        name = (f"{self.target_source}_ctx{self.context_steps}_h{self.horizon_steps}"
                 f"_lat{self.latency_steps}_{covariates}")
+        if self.raft is not None:
+            identity = json.dumps({
+                "raft": asdict(self.raft),
+                "archive": self.raft.archive_digest,
+                "model_weather": "dataset",
+                "train": [self.train_start, self.train_end],
+                "test": [self.test_start, self.test_end],
+                "issue_time": self.issue_time,
+                "covariates": self.covariates,
+            }, sort_keys=True)
+            name += f"_raft-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
+        return name
 
 
 @dataclass
@@ -65,6 +78,8 @@ def load_forecaster(model_key: str, settings: BacktestSettings) -> Forecaster:
     if model_key == "persistence":
         return Persistence(min_context=settings.horizon_steps + settings.latency_steps)
     if model_key in config.TRADITIONAL_MODELS:
+        from src.models_traditional import load_traditional
+
         return load_traditional(
             model_key,
             strategy=settings.traditional_strategy,
@@ -137,6 +152,24 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
     requested_base_keys = [key for key in model_keys if key not in config.ENSEMBLE_MODELS]
     dependency_keys = config.ENSEMBLE_BASE_MODELS if ensemble_keys else []
     run_keys = list(dict.fromkeys([*requested_base_keys, *dependency_keys]))
+    tsfm_keys = [key for key in requested_base_keys if key in config.TSFM_MODELS]
+
+    raft = None
+    raft_fit_seconds = raft_seconds = 0.0
+    if settings.raft is not None:
+        if not tsfm_keys:
+            raise ValueError("Select at least one TSFM to run RAFT")
+        if (settings.context_steps != CONTEXT_HOURS * STEPS_PER_HOUR
+                or settings.horizon_steps != HORIZON_HOURS * STEPS_PER_HOUR
+                or settings.latency_steps != 0 or not settings.issue_time.endswith(":00")):
+            raise ValueError("RAFT requires a 72 h context, 39 h horizon, zero latency and a whole-hour issue time")
+        if pd.Timestamp(settings.train_end) > pd.Timestamp(settings.test_start):
+            raise ValueError("RAFT training must end before the first evaluation origin")
+        start = time.perf_counter()
+        raft = RaftRetriever(settings.raft, dataset.target, settings.target_source,
+                             int(settings.issue_time.split(":")[0]), pd.Timestamp(settings.train_start),
+                             pd.Timestamp(settings.train_end))
+        raft_fit_seconds = time.perf_counter() - start
 
     forecasters = [load_forecaster(key, settings) for key in run_keys]
     forecaster_by_key = dict(zip(run_keys, forecasters))
@@ -145,13 +178,22 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
 
     # Same issue times for every model: skip a day if any model would get incomplete data
     valid, skipped = [], []
+    raft_results = []
     for issue in issue_times(settings):
         context_end = _context_end(issue, settings)
         last = issue + (settings.horizon_steps - 1) * STEP
         ok = _complete(dataset.target, context_end - (max(context_steps.values()) - 1) * STEP, last)
         if ok and covariate_contexts:
             ok = _complete(dataset.weather[settings.covariates],
-                           context_end - (max(covariate_contexts) - 1) * STEP, last)
+                           context_end - (max(covariate_contexts) - 1) * STEP,
+                           last)
+        if ok and raft is not None:
+            start = time.perf_counter()
+            retrieval = raft.predict(issue)
+            raft_seconds += time.perf_counter() - start
+            ok = retrieval is not None
+            if ok:
+                raft_results.append(retrieval)
         (valid if ok else skipped).append(issue)
     if skipped:
         logger.warning("Skipped %d issue times with incomplete data: %s",
@@ -197,6 +239,28 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
         name: getattr(forecaster_by_key[key], "configuration", {})
         for key, name in zip(requested_base_keys, requested_names)
     }
+
+    if raft is not None:
+        from src.models_tsfm import blend_tsfm_with_raft
+
+        retrieval = pd.concat([result.to_long() for result in raft_results], ignore_index=True)
+        retrieval.insert(2, "lead_step", ((retrieval["timestamp"] - retrieval["issue_time"]) / STEP).astype(int))
+        retrieval["actual"] = dataset.target.reindex(retrieval["timestamp"]).to_numpy()
+        base_names = [forecaster_by_key[key].name for key in tsfm_keys]
+        start = time.perf_counter()
+        blended = blend_tsfm_with_raft(base_predictions[base_predictions["model"].isin(base_names)],
+                                       retrieval, settings.raft.gamma)
+        blend_seconds = time.perf_counter() - start
+        output_tables.extend([retrieval, blended])
+        retrieval_name = raft_results[0].model
+        timings[retrieval_name] = {"load_s": 0.0, "fit_s": raft_fit_seconds, "predict_s": raft_seconds}
+        model_configs[retrieval_name] = {"parameters": asdict(settings.raft),
+                                         "weather_archive_sha256": settings.raft.archive_digest,
+                                         "model_weather": "dataset"}
+        for name in base_names:
+            blend_name = f"{name} + {retrieval_name}"
+            timings[blend_name] = {"load_s": 0.0, "fit_s": 0.0, "predict_s": blend_seconds / len(base_names)}
+            model_configs[blend_name] = {"base_model": name, "gamma": settings.raft.gamma}
 
     ensemble_base_names = (
         [forecaster_by_key[key].name for key in config.ENSEMBLE_BASE_MODELS]

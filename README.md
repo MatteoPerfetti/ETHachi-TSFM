@@ -98,6 +98,64 @@ python main.py --reuse    # reuse the saved results of the same settings: only m
 Output: the metrics table in the terminal, the forecasts in `results/<run>.parquet` (+ `.json` with settings,
 skipped days and timings) and a forecast plot in `plots/`.
 
+### Compare TSFMs with RAFT
+
+Use the **Add RAFT and TSFM + RAFT forecasts** checkbox in the dashboard, or pass
+`--raft-weather` and `--raft-capacity-mw` to `main.py`. Supply the nominal
+capacity in MW for the configured production target and a local Parquet
+archive with one row per `(issue_time, timestamp)` in UTC. Each issue needs
+39 hourly forecasts starting at the issue time. Include forecasts for the
+evaluation issues and historical candidates on the six-hour grid aligned to
+the configured issue hour (03:00, 09:00, 15:00 and 21:00 UTC by default).
+Each row must come from a forecast available by its issue time. The archive
+needs the target's RAFT weather columns in `src/raft.py`. RAFT uses this archive
+for retrieval. TSFMs and traditional models receive their selected past and
+future covariates from the regular dataset in both modes.
+
+The RAFT run compares each selected TSFM, RAFT alone and each weighted blend
+on the same issues. RAFT ranks episodes using 288 production samples at 15-minute
+resolution and 39 hourly values per weather variable, then averages the matched
+156-step production profiles. The TSFM weight
+defaults to 0.5 and can be set with `--raft-gamma` or the dashboard. RAFT and
+its blends provide point forecasts. Gamma 1 reproduces the TSFM with its
+original quantiles. Distance scales are fit on chronological training pairs.
+This mode uses a 72-hour context, a 39-hour horizon and zero data latency.
+
+Add `--raft-validation-start` to tune RAFT with Optuna before running the final
+backtest. Choose a UTC date with enough archived issues before the test starts.
+The tuning run fits distance scales on the earlier training segment, and
+validation horizons must finish before the test. TSFM forecasts are computed
+once for validation. The objective is mean daily RMSE in MW across the selected
+TSFMs, with one shared set of parameters.
+
+```bash
+python main.py --raft-weather data/raft_weather_ecmwf_wind.parquet --raft-capacity-mw 5439.18 --raft-validation-start 2024-10-01T00:00Z --raft-trials 50
+```
+
+The study searches alpha, lambda, gamma, the number of neighbors (10/15/20)
+and the softmax temperature (0.05/0.1/0.2). The final backtest uses the winning
+parameters and fits distance scales on the configured training period. The
+saved JSON records the validation score, coverage, trial count and seed
+(`--raft-seed`, default 42).
+
+For the Belgian wind benchmark, `src/datasource.py` provides a dedicated
+archive builder exposed by `scripts/build_raft_weather.py`. It builds the
+Parquet from [Open-Meteo Single Runs](https://open-meteo.com/en/docs/single-runs-api)
+using ECMWF IFS 9 km forecasts. It takes the 00/12 UTC run initialized at least
+nine hours before each issue, and combines three representative points for
+Flanders, Wallonia and offshore wind using approximate Elia 2024 capacity
+shares. The resulting archive records the run initialization separately from
+the backtest issue. The spatial average is an approximation of national wind
+conditions.
+
+```bash
+python scripts/build_raft_weather.py 2024-03-14T09:00Z 2025-12-30T09:00Z data/raft_weather_ecmwf_wind.parquet
+```
+
+The script caches each downloaded run locally, so repeating the command can
+fill gaps left by temporary API errors. Check the number of usable issues it
+reports before comparing runs.
+
 ### Dashboard
 ```bash
 python -m streamlit run app.py

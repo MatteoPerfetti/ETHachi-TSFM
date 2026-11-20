@@ -5,6 +5,8 @@
 Saved runs are read from results/ (written by main.py or by the form in the sidebar), nothing is recomputed
 to look at them. Defaults come from config.py.
 """
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
@@ -15,6 +17,7 @@ from src.dataset import load_dataset
 from src.feature_selection import load_selection, run_tree_selection, save_selection, tsfm_covariates
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
 from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
+from src.raft import RaftSettings
 from src.validate_config import validate_config
 
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
@@ -131,6 +134,10 @@ def new_backtest_form(expanded: bool) -> None:
             covariates = st.multiselect("Weather covariates (TSFMs) - selection", list(dataset.weather.columns),
                                         default=[c for c in default if c in dataset.weather.columns],
                                         key=f"covariates_{target}")
+            use_raft = st.checkbox("Add RAFT and TSFM + RAFT forecasts")
+            raft_archive = st.text_input("RAFT weather archive (local Parquet path)")
+            capacity = st.number_input("RAFT nominal capacity [MW]", min_value=0.0)
+            gamma = st.number_input("TSFM weight in RAFT blend", min_value=0.0, max_value=1.0, value=0.5)
             submitted = st.form_submit_button("Run backtest", type="primary")
         st.caption("A full year takes minutes per TSFM on CPU. Re-running a model with the same settings "
                    "replaces only its forecasts in the saved run.")
@@ -138,11 +145,19 @@ def new_backtest_form(expanded: bool) -> None:
         if not models:
             st.sidebar.error("Choose at least one model.")
             return
-        settings = BacktestSettings(context_steps=int(context), horizon_steps=int(horizon),
-                                    latency_steps=int(latency), covariates=covariates,
-                                    traditional_strategy=traditional_strategy, target_source=target)
-        with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
-            save_backtest(run_backtest(dataset, models, settings))
+        try:
+            if use_raft and not raft_archive.strip():
+                raise ValueError("Enter the local RAFT weather archive path.")
+            raft = (RaftSettings(str(Path(raft_archive).resolve()), float(capacity), gamma=float(gamma))
+                    if use_raft else None)
+            settings = BacktestSettings(context_steps=int(context), horizon_steps=int(horizon),
+                                        latency_steps=int(latency), covariates=covariates,
+                                        traditional_strategy=traditional_strategy, target_source=target, raft=raft)
+            with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
+                save_backtest(run_backtest(dataset, models, settings))
+        except (OSError, ValueError) as error:
+            st.sidebar.error(str(error))
+            return
         st.session_state["run"] = settings.run_name
         st.rerun()
 

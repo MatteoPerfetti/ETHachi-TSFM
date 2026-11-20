@@ -1,26 +1,33 @@
+from __future__ import annotations
+
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-import torch
-from chronos import BaseChronosPipeline
-from timestral import TimestralForecaster
-from timesfm import TimesFM3Forecaster
 
 import config
 from logger import logger
 from src.forecast import QUANTILE_COLUMNS, Forecaster, ForecastRequest, ForecastResult
 
+if TYPE_CHECKING:
+    from chronos import BaseChronosPipeline
+    from timestral import TimestralForecaster
+    from timesfm import TimesFM3Forecaster
+
 TSFM_BATCH_SIZE = 64  # requests per model call; lower it if the device runs out of memory
 
 
 def default_device() -> str:
+    import torch
+
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _to_numpy(values: Any) -> np.ndarray:
     """Torch tensor (any device) or array-like -> float numpy array."""
+    import torch
+
     if isinstance(values, torch.Tensor):
         values = values.detach().cpu().numpy()
     return np.asarray(values, dtype=float)
@@ -102,6 +109,8 @@ class Chronos2Adapter(TSFMAdapter):
     model_key = "chronos2"
 
     def _load(self, checkpoint: str) -> BaseChronosPipeline:
+        from chronos import BaseChronosPipeline
+
         pipeline = BaseChronosPipeline.from_pretrained(checkpoint, device_map=self.device)
         self.max_context = pipeline.model_context_length
         return pipeline
@@ -139,6 +148,8 @@ class TimestralAdapter(TSFMAdapter):
     model_key = "timestral_209m"
 
     def _load(self, checkpoint: str) -> TimestralForecaster:
+        from timestral import TimestralForecaster
+
         forecaster = TimestralForecaster.from_pretrained(checkpoint, device=self.device)
         self.max_context = forecaster.max_context
         return forecaster
@@ -173,6 +184,8 @@ class TimesFMAdapter(TSFMAdapter):
     model_key = "timesfm3"
 
     def _load(self, checkpoint: str) -> TimesFM3Forecaster:
+        from timesfm import TimesFM3Forecaster
+
         forecaster = TimesFM3Forecaster.from_pretrained(checkpoint, device=self.device)
         self.max_context = forecaster.global_context
         return forecaster
@@ -206,3 +219,19 @@ def load_tsfm(model_key: str, device: str | None = None) -> TSFMAdapter:
     if model_key not in TSFM_ADAPTERS:
         raise ValueError(f"No TSFM adapter for '{model_key}', available: {list(TSFM_ADAPTERS)}")
     return TSFM_ADAPTERS[model_key](device=device)
+
+
+def blend_tsfm_with_raft(tsfm: pd.DataFrame, raft: pd.DataFrame, gamma: float) -> pd.DataFrame:
+    """Combine every selected TSFM with the same RAFT point forecast at each issue."""
+    keys = ["issue_time", "timestamp"]
+    if not 0 <= gamma <= 1:
+        raise ValueError("RAFT gamma must be in [0, 1]")
+    combined = tsfm.merge(raft[[*keys, "q50"]].rename(columns={"q50": "raft_q50"}),
+                          on=keys, how="left", validate="many_to_one")
+    if combined["raft_q50"].isna().any():
+        raise ValueError("Every TSFM forecast in a RAFT run needs an aligned RAFT forecast")
+    combined["model"] = combined["model"] + " + RAFT"
+    if gamma != 1:
+        combined["q50"] = gamma * combined["q50"] + (1 - gamma) * combined["raft_q50"]
+        combined[["q10", "q90"]] = np.nan
+    return combined[tsfm.columns]
