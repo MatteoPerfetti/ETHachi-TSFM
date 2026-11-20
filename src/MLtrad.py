@@ -20,12 +20,13 @@ Assumptions and differences from the Hitachi technical report:
   report does not specify target context windows or pooled forecast horizons.
 """
 
+from __future__ import annotations
+
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-import optuna
 import pandas as pd
 from sklearn.metrics import mean_pinball_loss, root_mean_squared_error
 
@@ -594,6 +595,8 @@ def tune_traditional_model(
     n_trials: int,
 ) -> tuple[dict, float]:
     """Tune a traditional model on mean pinball loss across time folds."""
+    import optuna
+
     def objective(trial: optuna.Trial) -> float:
         parameters = _suggest_parameters(trial, model_name)
         trial.set_user_attr("model_parameters", parameters)

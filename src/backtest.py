@@ -363,6 +363,11 @@ def run_recorded_backtest(dataset: Dataset, model_keys: list[str], settings: Bac
         path = save_backtest(result, directory, preserve_history=True)
         attempt.update(status="completed", result=path.name, finished_at=datetime.now(timezone.utc).isoformat())
         write_record(attempt_path, attempt)
+        try:
+            from src.experiment_tracking import track_evaluation
+            track_evaluation(path)
+        except Exception as exc:
+            logger.warning("Backtest saved locally, but MLflow tracking failed: %s", exc)
         return path
     except BaseException as exc:
         attempt.update(status="failed", error=f"{type(exc).__name__}: {exc}",

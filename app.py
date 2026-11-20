@@ -7,8 +7,12 @@ to look at them. Defaults come from config.py.
 """
 import matplotlib.pyplot as plt
 import json
+import re
+import subprocess
+import sys
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 
 import config
 from src.backtest import BacktestSettings, load_backtest, run_recorded_backtest, saved_runs
@@ -40,14 +44,14 @@ def get_dataset(target_source: str = config.TARGET_SOURCE):
 def feature_selection_section() -> None:
     """Feature selection for the TSFM covariates: settings first in the sidebar, one tab per target source."""
     modes = config.TREE_SELECTION_MODES
-    with st.sidebar.expander("Feature selection - Random Forest Tree", expanded=False):
+    with st.expander("Feature ranking settings", expanded=False):
         mode = st.radio("Rank", list(modes), format_func=lambda m: modes[m][2],
                         index=list(modes).index("groups" if config.TREE_GROUP_SELECTION_BOOL else "features"))
         lags = st.checkbox("Target lags as candidates", value=config.TREE_SELECTION_LAGS)
         calendar = st.checkbox("Calendar dummies as candidates", value=config.TREE_SELECTION_CALENDAR)
         top_n = st.number_input("Bars shown", min_value=5, max_value=200, value=config.TREE_SELECTION_TOP_N_PLOT)
         st.caption("Note: Weather covariates are included by default")
-    with st.expander("🔎 Feature selection for the TSFM covariates", expanded=False):
+    with st.expander("Optional: rank candidate weather features", expanded=False):
         sources = list(config.ELIA_SOURCES)
         for tab, source in zip(st.tabs([s.capitalize() for s in sources]), sources):
             with tab:
@@ -109,13 +113,13 @@ def new_backtest_form(expanded: bool) -> None:
         adapters = available_adapters() if target == "wind" else {}
         def model_label(key: str) -> str:
             if key not in adapters:
-                return config.MODELS_REGISTRY[key].get("name", key)
+                return config.MODELS_REGISTRY[key].get("name", {"chronos2": "Chronos-2 (zero-shot)", "timestral_209m": "Timestral-209M (zero-shot)", "timesfm3": "TimesFM-3 (zero-shot)"}.get(key, key))
             record = adapters[key]
             _, family, run_id = key.split(":", 2)
             return (f"{family} LoRA — {run_id} (context {record.get('context_steps', '?')}, "
                     f"steps {record.get('steps', '?')}, rank {record.get('rank', '?')})")
         with st.form("new_backtest"):
-            models = st.multiselect("Models and saved adapters", [*RUNNABLE_MODELS, *adapters],
+            models = st.multiselect("Models to compare", [*RUNNABLE_MODELS, *adapters],
                                     default=[m for m in config.BACKTEST_MODELS if m in RUNNABLE_MODELS],
                                     format_func=model_label)
             start_date = st.date_input("First issue date (UTC)", value=pd.Timestamp(config.TEST_START).date())
@@ -141,10 +145,11 @@ def new_backtest_form(expanded: bool) -> None:
             )
             # default: the covariates ticked in the feature selection table, else the ones from config.py
             default = st.session_state.get("ticked_covariates", {}).get(target, config.TSFM_COVARIATES.get(target, []))
-            covariates = st.multiselect("Weather covariates (TSFMs) - selection", list(dataset.weather.columns),
+            covariates = st.multiselect("Weather inputs for rolling forecasts", list(dataset.weather.columns),
                                         default=[c for c in default if c in dataset.weather.columns],
                                         key=f"covariates_{target}")
-            submitted = st.form_submit_button("Run backtest", type="primary")
+            st.caption("Selected weather is supplied at forecast time to models that support it. Clear the selection for wind-only forecasts. Historical future weather is an oracle, not an archived forecast.")
+            submitted = st.form_submit_button("Run comparison", type="primary")
         st.caption("Each backtest is saved separately. Training does not start a backtest automatically. "
                    "Use validation dates to compare settings; reserve the 2025 holdout for the final comparison.")
     if submitted:
@@ -305,14 +310,24 @@ def metrics_tab(predictions: pd.DataFrame, models: list[str], window: str, meta:
         ),
         width="stretch",
     )
-    st.caption("Scores of each forecast, averaged over the days (Predico); lower is better, best in green. "
+    st.caption("RMSE measures the median forecast error; Winkler80 measures interval width and misses. Both are averaged across forecast origins; lower is better. "
                "Winkler 80%: width of the q10–q90 interval plus 10× the distance of actual values outside it. "
                "vs Persistence: RMSE relative to persistence (shown if persistence is selected).")
 
+    st.subheader("Compare average errors")
+    chart_data = table.reset_index().rename(columns={table.index.name or "index": "Model"})
+    metric_choice = st.selectbox("Error to compare", ["RMSE", "Winkler80"], format_func=lambda m: SCORE_LABELS[m])
+    chart_data = chart_data.dropna(subset=[metric_choice])
+    if not chart_data.empty:
+        fig = px.bar(chart_data, x=metric_choice, y="Model", orientation="h", text_auto=".1f",
+                     labels={metric_choice: SCORE_LABELS[metric_choice]}, title="Mean score per forecast ? lower is better")
+        fig.update_layout(yaxis={"categoryorder": "total descending"}, showlegend=False, height=max(280, 65 * len(chart_data) + 120))
+        st.plotly_chart(fig, width="stretch", theme=None, alt="Mean forecast error by model")
+    st.subheader("Error by forecast date")
     metric = st.radio("Daily score", ["RMSE", "Winkler80"], horizontal=True,
                       format_func=lambda m: SCORE_LABELS[m])
     daily = daily_scores(predictions, window)
-    st.plotly_chart(plotly_daily_scores(daily, metric, models), width="stretch", theme=None)
+    st.plotly_chart(plotly_daily_scores(daily, metric, models), width="stretch", theme=None, alt="Forecast error by issue date")
     st.download_button("Download daily scores (CSV)", daily.reset_index().to_csv(index=False).encode("utf-8"),
                        file_name=f"daily_scores_{window}.csv", mime="text/csv")
 
@@ -335,7 +350,7 @@ def period_tab(predictions: pd.DataFrame, models: list[str], bands: bool) -> Non
         st.warning("'From' must be before 'To'.")
         return
     st.plotly_chart(plotly_backtest_period(predictions, str(start), str(end), models, bands), width="stretch",
-                    theme=None)
+                    theme=None, alt="Rolling next-day forecasts and actual values")
     st.caption("For every daily forecast only its D+1 part is shown, so consecutive forecasts tile the timeline; "
                "a jump at midnight is the switch to the next forecast. Click the legend to hide a model.")
 
@@ -345,39 +360,173 @@ def single_tab(predictions: pd.DataFrame, models: list[str], window: str, bands:
     issue = st.select_slider("Issue time", options=issues, value=issues[0],
                              format_func=lambda t: pd.Timestamp(t).strftime("%Y-%m-%d %H:%M"))
     issue = pd.Timestamp(issue)
-    st.plotly_chart(plotly_single_forecast(predictions, issue, models, bands), width="stretch", theme=None)
+    st.caption("Lines show median forecasts (q50); shaded areas show q10?q90. Use the legend to hide a model.")
+    st.plotly_chart(plotly_single_forecast(predictions, issue, models, bands), width="stretch", theme=None, alt="Forecasts and actual values for one issue time")
     scores = daily_scores(predictions[predictions["issue_time"] == issue], window).droplevel("issue_time")
     st.dataframe(scores.rename(columns=SCORE_LABELS).style.format("{:,.1f}", na_rep="–"), width="content")
     st.caption(f"Scores of this forecast on the evaluation window ({WINDOW_LABELS[window]}).")
 
 
+def training_form() -> None:
+    """Start the existing standalone PEFT trainers without blocking the dashboard."""
+    st.caption("Train a new wind-only LoRA adapter. Training uses no weather covariates; weather can be selected separately for evaluation.")
+    with st.form("training_form"):
+        family = st.selectbox("Model to fine-tune", ["chronos2", "timestral_209m"], format_func=lambda x: {"chronos2": "Chronos-2", "timestral_209m": "Timestral-209M"}[x])
+        run_id = st.text_input("Unique training run name", help="Letters, digits, hyphens and underscores.")
+        context = st.number_input("Training context [days]", min_value=1, max_value=30, value=3)
+        steps = st.number_input("Optimizer steps", min_value=1, max_value=100000, value=200)
+        batch_size = st.number_input("Training batch size", min_value=1, max_value=512, value=8)
+        rank = st.number_input("LoRA rank", min_value=1, max_value=256, value=8)
+        learning_rate = st.number_input("Learning rate", min_value=0.00000001, max_value=1.0, value=0.00001, format="%.8f")
+        seed = st.number_input("Random seed", min_value=0, max_value=2147483647, value=42)
+        device = st.selectbox("Training device", ["auto", "cpu", "cuda"])
+        submitted = st.form_submit_button("Start training")
+    if submitted:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", run_id):
+            st.error("Enter a run name using letters, digits, hyphens or underscores.")
+            return
+        run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / family / run_id
+        logs = config.BACKTEST_RESULTS_DIR / "training_logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        log_path = logs / f"{family}-{run_id}.log"
+        if run_dir.exists() or log_path.exists():
+            st.error("This run name already exists. Choose a new name.")
+            return
+        module = "tuning.train_chronos2" if family == "chronos2" else "tuning.train_timestral"
+        cmd = [sys.executable, "-u", "-m", module, "--run-id", run_id, "--context-days", str(context), "--steps", str(steps), "--batch-size", str(batch_size), "--rank", str(rank), "--learning-rate", str(learning_rate), "--seed", str(seed), "--device", device]
+        if family == "chronos2": cmd.extend(["--backend", "peft"])
+        try:
+            with log_path.open("x", encoding="utf-8") as log:
+                proc = subprocess.Popen(cmd, cwd=str(config.BACKTEST_RESULTS_DIR.parent), stdout=log, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, ValueError) as exc:
+            st.error(f"Could not start training: {exc}")
+            return
+        st.session_state["started_training"] = {"run": run_id, "family": family, "pid": proc.pid, "log": str(log_path)}
+        st.success(f"Started {family} training: {run_id}. Refresh to inspect its status.")
+    info = st.session_state.get("started_training")
+    if info:
+        p = config.BACKTEST_RESULTS_DIR / "finetuning" / info["family"] / info["run"] / "run.json"
+        if p.exists():
+            try:
+                record = json.loads(p.read_text(encoding="utf-8"))
+                st.write(f"Run status: {record.get('status', 'unknown')}")
+            except (OSError, ValueError):
+                st.caption("Training status is being written.")
+        else:
+            st.caption("Waiting for the trainer to create its record.")
+        log_path = Path(info["log"])
+        if log_path.exists():
+            st.code(log_path.read_text(encoding="utf-8", errors="replace")[-6000:] or "Starting...", language=None)
+
+
+def cross_run_comparison(anchor: str, runs: dict) -> None:
+    """Compare saved models only when settings, dataset and rolling actuals match."""
+    from src.experiment_tracking import compatible_evaluations
+
+    st.subheader("Compare models across saved runs")
+    matches = compatible_evaluations(anchor, runs)
+    st.caption("Only runs with the same recorded data fingerprint, forecast settings, origins and ELIA actuals can be compared. Older runs without a fingerprint are limited to their own results.")
+    picks = st.multiselect("Compatible saved evaluations", matches, default=[anchor], key="cross_run_evaluations")
+    if not picks:
+        st.info("Select at least one evaluation.")
+        return
+    frames, configurations, baselines = [], {}, []
+    for name in picks:
+        data, meta = load_backtest(name)
+        for model in sorted(data["model"].unique()):
+            part = data[data["model"] == model].copy()
+            label = f"{model} | {name[-8:]}"
+            part["model"] = label
+            frames.append(part)
+            configurations[label] = meta.get("model_configs", {}).get(model, {})
+            if model.startswith("XGBoost"):
+                baselines.append(label)
+    if not frames:
+        st.info("No predictions in the selected evaluations.")
+        return
+    if not baselines:
+        st.warning("No XGBoost baseline in these evaluations. Select a compatible evaluation containing XGBoost, or run one for the same benchmark.")
+        return
+    baseline = st.selectbox("XGBoost reference", baselines)
+    models = list(configurations)
+    alternatives = [x for x in models if x not in baselines]
+    selected = st.multiselect("Models and adapters to compare", alternatives, default=alternatives, key="cross_run_models")
+    selected = [baseline, *selected]
+    predictions = pd.concat([f for f in frames if f["model"].iloc[0] in selected], ignore_index=True)
+    stats = summary(predictions, "all")
+    details = []
+    for model, score in stats.iterrows():
+        cfg = configurations.get(model, {})
+        train = cfg.get("training") or {}
+        details.append({"Model and evaluation": model, "Training run": cfg.get("run_id", "zero-shot / baseline"),
+                        "Rank": train.get("rank"), "Steps": train.get("steps"),
+                        "Training context": train.get("context_steps"), "Learning rate": train.get("learning_rate"),
+                        "RMSE [MW]": score["RMSE"], "Winkler80 [MW]": score["Winkler80"], "Origins": int(score["days"])})
+    st.dataframe(pd.DataFrame(details).sort_values("RMSE [MW]"), hide_index=True, width="stretch", alt="Rolling forecast errors and training settings")
+    st.caption("RMSE and Winkler80 are calculated for each rolling origin over all forecast steps, then averaged. Lower is better.")
+    issues = sorted(predictions.issue_time.unique())
+    issue = st.select_slider("Forecast issue time for comparison", options=issues, value=issues[0], key="cross_issue")
+    bands = st.checkbox("Show q10-q90 intervals", value=True, key="cross_bands")
+    st.plotly_chart(plotly_single_forecast(predictions, pd.Timestamp(issue), selected, bands), width="stretch", theme=None, alt="ELIA actual, XGBoost and selected model forecasts")
+    scores = daily_scores(predictions[predictions.issue_time == issue], "all").droplevel("issue_time")
+    st.dataframe(scores.rename(columns=SCORE_LABELS), width="stretch", alt="Errors for the selected forecast")
+    with st.expander("Training and evaluation details"):
+        choice = st.selectbox("Model details", selected)
+        st.json(configurations.get(choice, {}))
+
+
 def main() -> None:
     validate_config()
-    st.title("⚡ ETHachi-TSFM backtest")
-    feature_selection_section()
+    st.title("Forecast model comparison")
+    st.caption("Choose a saved comparison below, or configure a new rolling backtest in the sidebar.")
 
+    with st.expander("Train a new LoRA adapter"):
+        training_form()
     runs = saved_runs()
     new_backtest_form(expanded=not runs)
-    result_rows, evaluated = collect_results(runs)
-    results_overview(result_rows)
-    experiment_history(evaluated)
     if not runs:
-        st.info("No saved backtest in results/ yet: run one with the form in the sidebar or with `python main.py`.")
+        st.info("No saved comparison yet. Open Run a new backtest in the sidebar to create one.")
+        feature_selection_section()
         return
 
     names = list(runs)
     current = st.session_state.get("run")
-    run_name = st.sidebar.selectbox("Saved run", names, index=names.index(current) if current in names else 0)
+    # On a fresh session, prefer the newest saved comparison with weather inputs.
+    preferred = next((name for name in names if runs[name].get("settings", {}).get("covariates")), names[0])
+    def saved_label(name: str) -> str:
+        meta = runs[name]
+        model_names = list(meta.get("scores_all", {}))
+        if not model_names:
+            try:
+                model_names = sorted(get_run(name, (config.BACKTEST_RESULTS_DIR / f"{name}.parquet").stat().st_mtime)["model"].unique())
+            except (OSError, ValueError, KeyError):
+                model_names = []
+        date = meta.get("settings", {}).get("test_start", "")[:10]
+        inputs = "weather" if meta.get("settings", {}).get("covariates") else "no weather"
+        return f"{date} | {inputs} | {', '.join(model_names) or name} | {name[-8:]}"
+    run_name = st.sidebar.selectbox("Saved comparison", names, index=names.index(current) if current in names else names.index(preferred),
+                                    format_func=saved_label, help="Each comparison contains only the models run together. Older runs can include other models, such as TimesFM-3.")
     st.session_state["run"] = run_name
     meta = runs[run_name]
     predictions = get_run(run_name, (config.BACKTEST_RESULTS_DIR / f"{run_name}.parquet").stat().st_mtime)
 
     available = sorted(predictions["model"].unique())
     models = st.sidebar.multiselect("Models", available, default=available)
+    baseline_models = [model for model in available if model.startswith("XGBoost")]
+    if baseline_models:
+        models = list(dict.fromkeys([*baseline_models, *models]))
+        st.sidebar.caption("XGBoost is always shown when available in this comparison.")
+    else:
+        st.sidebar.caption("This saved run has no XGBoost baseline. Select a compatible run or evaluate XGBoost.")
     window = st.sidebar.radio("Evaluation window", EVAL_WINDOWS, format_func=WINDOW_LABELS.get,
                               index=EVAL_WINDOWS.index(config.BACKTEST_EVAL_WINDOW))
     bands = st.sidebar.checkbox("Show q10–q90 bands", value=True)
+    st.subheader("Selected comparison")
     st.markdown(run_caption(meta))
+    if meta.get("settings", {}).get("covariates"):
+        st.warning("This comparison uses selected historical weather for future timestamps. Those values are not verified archived forecasts available at issue time; results are optimistic.")
+    else:
+        st.caption("No weather covariates were supplied for this comparison.")
     training_configs = {name: details.get("training") for name, details in meta.get("model_configs", {}).items()
                         if details.get("training")}
     if training_configs:
@@ -388,13 +537,21 @@ def main() -> None:
         return
 
     selected = predictions[predictions["model"].isin(models)]
-    tab_metrics, tab_period, tab_single = st.tabs(["Metrics", "Forecasts over a period", "Single forecast"])
+    st.caption("Only models saved in this comparison appear below. Choose another saved comparison, or run a new one to compare more models together.")
+    tab_metrics, tab_single, tab_period = st.tabs(["Compare errors", "Inspect one forecast", "Rolling forecasts"])
     with tab_metrics:
         metrics_tab(selected, models, window, meta)
-    with tab_period:
-        period_tab(selected, models, bands)
     with tab_single:
         single_tab(selected, models, window, bands)
+    with tab_period:
+        period_tab(selected, models, bands)
+    with st.expander("Compare across compatible runs", expanded=False):
+        cross_run_comparison(run_name, runs)
+    with st.expander("All saved results and training history"):
+        result_rows, evaluated = collect_results(runs)
+        results_overview(result_rows)
+        experiment_history(evaluated)
+    feature_selection_section()
 
 
 if __name__ == "__main__":
