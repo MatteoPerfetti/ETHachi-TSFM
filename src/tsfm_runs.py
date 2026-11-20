@@ -126,3 +126,9 @@ def finish_training(run_dir: Path, record: dict, status: str, error: str | None 
     if error is not None:
         record["error"] = error
     write_record(run_dir / "run.json", record)
+    try:
+        from src.experiment_tracking import track_training
+        track_training(run_dir, record)
+    except Exception as exc:
+        from logger import logger
+        logger.warning("Training saved locally, but MLflow tracking failed: %s", exc)

@@ -330,3 +330,18 @@ Evaluate one model, or compare its base and adapter on the same origins:
 ```
 
 Dates bound issue times with an exclusive end. The default is 09:00 UTC, zero latency, a 156-step horizon and 288 contiguous history steps. Inference context is independent of training. For adapter comparisons the exact base revision must already be cached. The command saves a unique JSON/Parquet pair directly under `results/` and does not reuse old results. Origins with incomplete history or labels are skipped, including the end of 2025 if the dataset has no later labels. This command is wind-only.
+## Experiment tracking with MLflow
+
+Training and rolling backtest results can be recorded locally in `results/mlflow.db` and `results/mlflow_artifacts/`. These files are ignored by Git; back them up alongside `results/`.
+
+After installing the project dependencies with `uv sync`, import existing records once:
+
+```powershell
+.\.venv\Scripts\python.exe import_experiments.py
+.\.venv\Scripts\python.exe -m mlflow ui --backend-store-uri sqlite:///results/mlflow.db --port 5000
+```
+
+Open http://localhost:5000 and select the `ETHachi forecasting` experiment. New completed training records and recorded backtests are logged automatically. If tracking fails, the original local run remains saved and a warning is written to the log; rerun the importer to retry. Each rolling model evaluation logs mean per-origin RMSE and Winkler80 over all forecast steps, plus its parameters and prediction artifact. Older records retain their original provenance and may have missing values.
+
+In Streamlit, choose a saved evaluation and open **Compare across compatible runs**. Select compatible evaluations containing the models and an XGBoost baseline. The comparison requires the same data fingerprint, settings, issue/timestamp grid, and ELIA actual values; old results without a data fingerprint can only be inspected within their own evaluation. ELIA and the chosen XGBoost baseline appear in the forecast plot. A missing baseline requires a matching new evaluation. This comparison does not train adapters or automatically schedule missing evaluations.
+In Streamlit, expand **Train a new LoRA adapter** to start an existing PEFT trainer in the background. The form records the run name, model, context, steps, batch size, rank, learning rate, seed and device; the adapter and a training log are saved locally. Refresh the dashboard to check status. These trainers currently use wind without weather covariates; evaluation covariates are selected separately. After training, evaluate the adapter using **Run a new backtest** before adding it to a benchmark comparison.
