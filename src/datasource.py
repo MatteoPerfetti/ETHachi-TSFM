@@ -10,9 +10,8 @@ from shapely import contains_xy
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
-from config import (DATA_DIR, INPUTS_DIR, SOLAR_REGION_DIR, DATA_PV_NUTS, DATA_PV_PRODUCTION_YEAR, DATA_PV_RANDOM_SEED, DATA_PV_REGIONS,
-                    DATA_PV_WEATHER_SAMPLES, RESOLUTIONCODE, STATISTICAL_PROPERTIES, ELIA_SOURCES,
-                    DATA_WIND_FARMS_PATH, DATA_WIND_PRODUCTION_YEAR, DATA_WIND_WEATHER_SAMPLES, DATA_WIND_RANDOM_SEED)
+from config import (DATA_DIR, INPUTS_DIR, RESOLUTIONCODE, STATISTICAL_PROPERTIES, ELIA_SOURCES, OPENMETEO_SOURCES,
+                    OPENMETEO_SETTINGS)
 from logger import logger
 from src.http_client import HttpClient, HttpError
 
@@ -142,6 +141,16 @@ def fetch_openmeteo(client: HttpClient, latitude: float, longitude: float, varia
     return df.set_index("timestamp").drop(columns="datetime")
 
 
+def previous_runs_openmeteo_fetch(client: HttpClient, latitude: float, longitude: float, variables: list[str],
+                                  start: str, end: str) -> pd.DataFrame:
+    """Query the Open-Meteo Previous Runs API (client bound to the previous_runs base_url) and return hourly data
+    like fetch_openmeteo, with every variable once per run: <variable> (most recent run), <variable>_previous_day1
+    and <variable>_previous_day2."""
+    suffixes = OPENMETEO_SOURCES["weather"]["previous_runs"]["suffixes"]
+    names = [f"{variable}{suffix}" for variable in variables for suffix in suffixes]
+    return fetch_openmeteo(client, latitude, longitude, names, start, end)
+
+
 def read_openmeteo_cache(path: Path) -> pd.DataFrame:
     """Read a cached fetch_openmeteo result, also from older caches that still hold datetime/timestamp columns."""
     df = pd.read_parquet(path).drop(columns=["datetime", "timestamp"], errors="ignore")
@@ -219,15 +228,41 @@ def fetch_openmeteo_region(client: HttpClient, points: pd.DataFrame, variables: 
 
 
 def load_openmeteo_region(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str], start: str,
-                          end: str, directory: Path) -> pd.DataFrame:
+                          end: str, directory: Path, chunk_size: int = 10) -> pd.DataFrame:
     """Return the raw point data from the local cache in `directory` if present, else fetch it from the
     Open-Meteo API and cache it."""
     path = directory / f"{name}_points_{cache_path(name, start, end, 'PT1H').name}"
     chunk_dir = path.with_name(f"{path.stem}_chunks")
     df = cached(f"{name} for {len(points)} points", path,
-                lambda: fetch_openmeteo_region(client, points, variables, start, end, chunk_dir=chunk_dir))
+                lambda: fetch_openmeteo_region(client, points, variables, start, end, chunk_size=chunk_size,
+                                               chunk_dir=chunk_dir))
     shutil.rmtree(chunk_dir, ignore_errors=True)
     return df
+
+
+def load_previous_runs_openmeteo_region(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str],
+                                        start: str, end: str, directory: Path) -> pd.DataFrame:
+    """Like load_openmeteo_region, but from the Previous Runs API (client bound to the previous_runs base_url):
+    every variable once per run (<variable>, <variable>_previous_day1, <variable>_previous_day2).
+
+    The call weight grows with the number of variables (three times as many as the plain request) and the days, so
+    the points are sent in chunks of at most OPENMETEO_SETTINGS["max_calls_per_request"] calls each. The minutely
+    and hourly limits are waited out (see get_json_waiting_for_limits). The daily limit is raised as an error, but
+    the chunks already fetched stay on disk, so running again the next day continues where it stopped.
+    """
+    suffixes = OPENMETEO_SOURCES["weather"]["previous_runs"]["suffixes"]
+    names = [f"{variable}{suffix}" for variable in variables for suffix in suffixes]
+    days = (pd.Timestamp(end[:10]) - pd.Timestamp(start[:10])).days + 1
+    calls_per_point = len(names) / 10 * days / 14
+    chunk_size = max(1, int(OPENMETEO_SETTINGS["max_calls_per_request"] / calls_per_point))
+    total_calls = calls_per_point * len(points)
+    daily_call_limit = OPENMETEO_SETTINGS["daily_call_limit"]
+    logger.info("%s: %d points x %d variables x %d days = about %.0f calls in chunks of %d points",
+                name, len(points), len(names), days, total_calls, chunk_size)
+    if total_calls > daily_call_limit:
+        logger.warning("%s needs about %.0f calls, above the daily limit of %d: expect it to stop and continue "
+                       "on the next day from the cached chunks", name, total_calls, daily_call_limit)
+    return load_openmeteo_region(name, client, points, names, start, end, directory, chunk_size)
 
 
 def reduce_openmeteo_region(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
@@ -281,7 +316,8 @@ def load_nuts_geometries(client: HttpClient, nuts_ids: dict[str, str]) -> dict[s
 
     The GeoJSON is cached under data/solar-region, named after its version, projection, scale and level.
     """
-    text = cached("NUTS polygons", SOLAR_REGION_DIR / "_".join(client.base_url.split("/")[-4:]), client.get_text,
+    cache_dir = OPENMETEO_SOURCES["weather"]["weather_sampling"]["solar"]["cache_dir"]
+    text = cached("NUTS polygons", cache_dir / "_".join(client.base_url.split("/")[-4:]), client.get_text,
                   read=lambda path: path.read_text(encoding="utf-8"),
                   write=lambda text, path: path.write_text(text, encoding="utf-8"))
     features = {f["properties"]["id"]: f["geometry"] for f in json.loads(text)["features"]}
@@ -299,16 +335,19 @@ def sample_points_in(geometry: BaseGeometry, n: int, rng: np.random.Generator) -
 
 
 def generate_pv_weather_samples(elia_client: HttpClient, nuts_client: HttpClient,
-                                regions: list[str] = DATA_PV_REGIONS, n_samples: int = DATA_PV_WEATHER_SAMPLES,
-                                seed: int = DATA_PV_RANDOM_SEED) -> pd.DataFrame:
+                                regions: list[str] = ELIA_SOURCES["solar"]["sample_regions"],
+                                n_samples: int = OPENMETEO_SOURCES["weather"]["weather_sampling"]["solar"]["n_samples"],
+                                seed: int = OPENMETEO_SOURCES["weather"]["weather_sampling"]["solar"]["seed"]
+                                ) -> pd.DataFrame:
     """Return n_samples random weather sample points (latitude, longitude, region), spread over the regions
     in proportion to their solar production.
 
-    elia_client is bound to the Elia solar dataset, nuts_client to DATA_PV_NUTS_URL.
+    elia_client is bound to the Elia solar dataset, nuts_client to the solar weather_sampling nuts_url.
     """
-    probabilities = load_region_probabilities("solar", elia_client, regions, DATA_PV_PRODUCTION_YEAR, RESOLUTIONCODE,
-                                              INPUTS_DIR)
-    geometries = load_nuts_geometries(nuts_client, {region: DATA_PV_NUTS[region] for region in regions})
+    nuts = OPENMETEO_SOURCES["weather"]["weather_sampling"]["solar"]["nuts"]
+    probabilities = load_region_probabilities("solar", elia_client, regions, ELIA_SOURCES["solar"]["production_year"],
+                                              RESOLUTIONCODE, INPUTS_DIR)
+    geometries = load_nuts_geometries(nuts_client, {region: nuts[region] for region in regions})
     return sample_points(probabilities, lambda region, n, rng: sample_points_in(geometries[region], n, rng),
                          n_samples, seed)
 
@@ -325,11 +364,12 @@ def wind_farm_sampler(farms: pd.DataFrame) -> RegionSampler:
 
 
 def generate_wind_weather_samples(elia_client: HttpClient, regions: list[str] = ELIA_SOURCES["wind"]["regions"],
-                                  n_samples: int = DATA_WIND_WEATHER_SAMPLES,
-                                  seed: int = DATA_WIND_RANDOM_SEED) -> pd.DataFrame:
+                                  n_samples: int = OPENMETEO_SOURCES["weather"]["weather_sampling"]["wind"]["n_samples"],
+                                  seed: int = OPENMETEO_SOURCES["weather"]["weather_sampling"]["wind"]["seed"]
+                                  ) -> pd.DataFrame:
     """Return n_samples random weather sample points (latitude, longitude, region) at wind farm locations,
     spread over the regions in proportion to their wind production. elia_client is bound to the Elia wind dataset."""
-    probabilities = load_region_probabilities("wind", elia_client, regions, DATA_WIND_PRODUCTION_YEAR, RESOLUTIONCODE,
-                                              INPUTS_DIR)
-    farms = pd.read_csv(DATA_WIND_FARMS_PATH, sep=";")
+    probabilities = load_region_probabilities("wind", elia_client, regions, ELIA_SOURCES["wind"]["production_year"],
+                                              RESOLUTIONCODE, INPUTS_DIR)
+    farms = pd.read_csv(OPENMETEO_SOURCES["weather"]["weather_sampling"]["wind"]["farms_path"], sep=";")
     return sample_points(probabilities, wind_farm_sampler(farms), n_samples, seed)

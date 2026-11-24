@@ -39,13 +39,17 @@ class BacktestSettings:
     traditional_strategy: str = config.TRADITIONAL_STRATEGY
     target_source: str = config.TARGET_SOURCE
     device: str | None = None
+    pca_components: int | float | None = config.PCA_N_COMPONENTS
 
     @property
     def run_name(self) -> str:
-        """e.g. wind_ctx288_h156_lat0_cov7-1a2b3c: covariate count + short hash of the (sorted) covariate names."""
+        """e.g. wind_ctx288_h156_lat0_cov7-1a2b3c_pca0.95: covariate count + short hash of the (sorted) covariate
+        names, plus the PCA setting if the covariates are condensed."""
         if self.covariates:
             digest = hashlib.md5(",".join(sorted(self.covariates)).encode()).hexdigest()[:6]
             covariates = f"cov{len(self.covariates)}-{digest}"
+            if self.pca_components is not None:
+                covariates += f"_pca{self.pca_components}"
         else:
             covariates = "nocov"
         return (f"{self.target_source}_ctx{self.context_steps}_h{self.horizon_steps}"
@@ -89,7 +93,8 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         device = settings.device or default_device()
         start = time.perf_counter()
         tuned = load_lora_run(run_dir, device)
-        forecaster = TSFM_ADAPTERS[family](device=device, model=tuned, name=f"{family} LoRA ({run_id})")
+        forecaster = TSFM_ADAPTERS[family](device=device, model=tuned, name=f"{family} LoRA ({run_id})",
+                                           pca_components=settings.pca_components)
         forecaster.load_seconds = time.perf_counter() - start
         forecaster.configuration = {"model_key": family, "run_id": run_id,
             "base_checkpoint": record["base_checkpoint"], "base_revision": record["base_revision"],
@@ -107,6 +112,7 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
             horizon_steps=settings.horizon_steps,
             latency_steps=settings.latency_steps,
             issue_time=settings.issue_time,
+            pca_components=settings.pca_components,
         )
     if config.MODELS_REGISTRY.get(model_key, {}).get("type") == "tsfm":
         from src.models_tsfm import load_tsfm, TSFM_ADAPTERS
@@ -117,11 +123,12 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
             options = {"allow_patterns": ["config.json", "model.safetensors"]} if model_key == "timestral_209m" else {}
             checkpoint = config.MODELS_REGISTRY[model_key]["checkpoint"]
             snapshot = snapshot_download(checkpoint, revision=revision, local_files_only=True, **options)
-            forecaster = TSFM_ADAPTERS[model_key](device=settings.device, checkpoint=snapshot)
+            forecaster = TSFM_ADAPTERS[model_key](device=settings.device, checkpoint=snapshot,
+                                                  pca_components=settings.pca_components)
             forecaster.configuration = {"model_key": model_key, "base_checkpoint": checkpoint, "base_revision": revision}
             return forecaster
 
-        forecaster = load_tsfm(model_key, device=settings.device)
+        forecaster = load_tsfm(model_key, device=settings.device, pca_components=settings.pca_components)
         forecaster.configuration = {"model_key": model_key,
                                     "base_checkpoint": config.MODELS_REGISTRY[model_key]["checkpoint"],
                                     "base_revision": None}

@@ -87,6 +87,12 @@ TSFM_COVARIATES = {
     ],
 }
 
+# PCA on the weather covariates, fitted on the training period only. It runs after each model's covariate frame is
+# assembled (after build_origin_aligned_dataset for the traditional models, on the request covariates for the TSFMs).
+# int = number of components, float in (0, 1) = share of explained variance, None = no PCA.
+PCA_N_COMPONENTS = 0.95
+PCA_PREFIX = "pc"
+
 PREDICTION_HORIZON_HOURS = 39
 HORIZON_STEPS = 4 * PREDICTION_HORIZON_HOURS
 PREDICTION_LENGTH = HORIZON_STEPS
@@ -162,18 +168,45 @@ DATA_START = "2023-12-28T00:00:00Z"
 DATA_END = "2025-12-31T23:45:00Z"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 INPUTS_DIR = DATA_DIR / "inputs"
+RESOLUTIONCODE = "PT15M"
+STATISTICAL_PROPERTIES = ["mean", "std", "min", "max"]
 
+# Elia targets. "regions" are queried from Elia; "production_year" sets the production shares that weight the
+# weather sample points. Solar can sample over the provinces ("sample_regions") instead of one point ("use_regions").
 ELIA_SOURCES = {
     "wind": {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods031/",
         "regions": ["Flanders", "Wallonia", "Federal"],
+        "production_year": 2025,
     },
     "solar": {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/",
         "regions": ["Belgium"],
+        "production_year": 2025,
+        "use_regions": False,
+        "sample_regions": [
+            "Flemish-Brabant",
+            "West-Flanders",
+            "East-Flanders",
+            "Limburg",
+            "Liège",
+            "Namur",
+            "Brussels",
+            "Hainaut",
+            "Walloon-Brabant",
+            "Antwerp",
+            "Luxembourg",
+        ],
     },
 }
-RESOLUTIONCODE = "PT15M"
+
+# Open-Meteo settings shared by all sources.
+# Open-Meteo counts a request as locations x variables / 10 x days / 14 calls (limits: 600/min, 5000/h, 10000/day).
+# The previous runs request is split into chunks of points that stay below max_calls_per_request calls each.
+OPENMETEO_SETTINGS = {
+    "max_calls_per_request": 1000,
+    "daily_call_limit": 10000,
+}
 
 OPENMETEO_SOURCES = {
     "weather": {
@@ -203,53 +236,44 @@ OPENMETEO_SOURCES = {
                     "wind_direction_180m",
                     "wind_gusts_10m",
                 ],
+        "previous_runs": {
+            "base_url": "https://previous-runs-api.open-meteo.com/v1/forecast",
+            # Suffix of every requested variable: "" = most recent run, then the runs of the previous day 1 and day 2
+            "suffixes": ("", "_previous_day1", "_previous_day2"),
+        },
+        "dwd": {
+            "use": True,
+            "path": DATA_DIR / "dwd" / "gen_weather_dwd.parquet",
+        },
+        # Sample points and spatial weather aggregation, per Elia source (regions: see ELIA_SOURCES).
+        "weather_sampling": {
+            "solar": {
+                "n_samples": 200,
+                "seed": 42,
+                "cache_dir": DATA_DIR / "solar-region",
+                "nuts": {
+                    "Brussels": "BE10",
+                    "Antwerp": "BE21",
+                    "Limburg": "BE22",
+                    "East-Flanders": "BE23",
+                    "Flemish-Brabant": "BE24",
+                    "West-Flanders": "BE25",
+                    "Walloon-Brabant": "BE31",
+                    "Hainaut": "BE32",
+                    "Liège": "BE33",
+                    "Luxembourg": "BE34",
+                    "Namur": "BE35",
+                },
+                "nuts_url": "https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2024/4326/10M/nutsrg_2.json",
+            },
+            "wind": {
+                "n_samples": 50,
+                "seed": 42,
+                "farms_path": INPUTS_DIR / "belgium_wind_farms.csv",
+            },
+        },
     }
 }
-DATA_USE_DWD = True
-DATA_DWD_PATH = DATA_DIR / "dwd" / "gen_weather_dwd.parquet"
-
-# PV data sample points and spatial weather aggregation.
-DATA_PV_REGIONS_BOOL = False
-DATA_PV_REGIONS = [
-    "Flemish-Brabant",
-    "West-Flanders",
-    "East-Flanders",
-    "Limburg",
-    "Liège",
-    "Namur",
-    "Brussels",
-    "Hainaut",
-    "Walloon-Brabant",
-    "Antwerp",
-    "Luxembourg",
-]
-SOLAR_REGION_DIR = DATA_DIR / "solar-region"
-DATA_PV_PRODUCTION_YEAR = 2025
-DATA_PV_WEATHER_SAMPLES = 200
-DATA_PV_RANDOM_SEED = 42
-STATISTICAL_PROPERTIES = ["mean", "std", "min", "max"]
-DATA_PV_NUTS = {
-    "Brussels": "BE10",
-    "Antwerp": "BE21",
-    "Limburg": "BE22",
-    "East-Flanders": "BE23",
-    "Flemish-Brabant": "BE24",
-    "West-Flanders": "BE25",
-    "Walloon-Brabant": "BE31",
-    "Hainaut": "BE32",
-    "Liège": "BE33",
-    "Luxembourg": "BE34",
-    "Namur": "BE35",
-}
-DATA_PV_NUTS_URL = (
-    "https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2024/4326/10M/nutsrg_2.json"
-)
-
-# Wind data sample points and spatial weather aggregation.
-DATA_WIND_FARMS_PATH = INPUTS_DIR / "belgium_wind_farms.csv"
-DATA_WIND_PRODUCTION_YEAR = 2025
-DATA_WIND_WEATHER_SAMPLES = 50
-DATA_WIND_RANDOM_SEED = 42
 
 LOG_LEVEL = "INFO"
 LOG_FILE = None

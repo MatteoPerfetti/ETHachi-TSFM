@@ -31,13 +31,14 @@ def load_sources() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     for name, src in config.ELIA_SOURCES.items():
         with HttpClient(src["base_url"]) as client:
             targets_data[name] = load_elia(name, client, src["regions"], config.DATA_START, config.DATA_END, config.RESOLUTIONCODE)
-    if config.DATA_PV_REGIONS_BOOL:
-        with HttpClient(config.ELIA_SOURCES["solar"]["base_url"]) as elia, HttpClient(config.DATA_PV_NUTS_URL) as nuts:
-            points = generate_pv_weather_samples(elia, nuts)
+    if config.ELIA_SOURCES["solar"]["use_regions"]:
         src = config.OPENMETEO_SOURCES["weather"]
+        solar_sampling = src["weather_sampling"]["solar"]
+        with HttpClient(config.ELIA_SOURCES["solar"]["base_url"]) as elia, HttpClient(solar_sampling["nuts_url"]) as nuts:
+            points = generate_pv_weather_samples(elia, nuts)
         with HttpClient(src["base_url"], timeout=120) as om:
             features_data["weather"] = load_weather_statistics("weather", om, points, src["hourly_pv"], config.DATA_START,
-                                                               config.DATA_END, config.SOLAR_REGION_DIR)
+                                                               config.DATA_END, solar_sampling["cache_dir"])
     else:
         for name, src in config.OPENMETEO_SOURCES.items():
             with HttpClient(src["base_url"]) as client:
@@ -61,8 +62,9 @@ def load_targets(targets_data: dict[str, pd.DataFrame], target_source: str = con
 
 def load_weather(features_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Align the weather to 15 min (Open-Meteo, plus DWD if configured) and encode directions as sin/cos."""
-    if config.DATA_USE_DWD:
-        weather = merge_dwd_weather(features_data["weather"], config.DATA_DWD_PATH)
+    dwd = config.OPENMETEO_SOURCES["weather"]["dwd"]
+    if dwd["use"]:
+        weather = merge_dwd_weather(features_data["weather"], dwd["path"])
     else:
         weather = merge({name: interpolate_to_15min(df) for name, df in features_data.items()})
     return encode_directions(weather)
