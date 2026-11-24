@@ -32,6 +32,7 @@ class BacktestSettings:
     train_start: str = config.TRAIN_START
     train_end: str = config.TRAIN_END
     issue_time: str = config.BACKTEST_ISSUE_TIME
+    issue_every_days: int = config.BACKTEST_ISSUE_EVERY_DAYS
     horizon_steps: int = config.BACKTEST_HORIZON_STEPS
     context_steps: int = config.BACKTEST_CONTEXT_STEPS
     latency_steps: int = config.BACKTEST_LATENCY_STEPS
@@ -42,14 +43,17 @@ class BacktestSettings:
 
     @property
     def run_name(self) -> str:
-        """e.g. wind_ctx288_h156_lat0_cov7-1a2b3c: covariate count + short hash of the (sorted) covariate names."""
+        """e.g. wind_ctx288_h156_lat0_cov7-1a2b3c: covariate count + short hash of the (sorted) covariate names.
+
+        A run on every N-th day only gets the suffix _everyNd (no suffix for daily runs, the default)."""
         if self.covariates:
             digest = hashlib.md5(",".join(sorted(self.covariates)).encode()).hexdigest()[:6]
             covariates = f"cov{len(self.covariates)}-{digest}"
         else:
             covariates = "nocov"
+        every = f"_every{self.issue_every_days}d" if self.issue_every_days != 1 else ""
         return (f"{self.target_source}_ctx{self.context_steps}_h{self.horizon_steps}"
-                f"_lat{self.latency_steps}_{covariates}")
+                f"_lat{self.latency_steps}_{covariates}{every}")
 
 
 @dataclass
@@ -130,9 +134,12 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
 
 
 def issue_times(settings: BacktestSettings) -> pd.DatetimeIndex:
-    """One issue time per day at settings.issue_time UTC, within [test_start, test_end)."""
+    """One issue time every settings.issue_every_days days (from the first test day) at settings.issue_time UTC,
+    within [test_start, test_end)."""
+    if settings.issue_every_days < 1:
+        raise ValueError(f"issue_every_days must be >= 1, got {settings.issue_every_days}")
     start, end = pd.Timestamp(settings.test_start), pd.Timestamp(settings.test_end)
-    days = pd.date_range(start.normalize(), end.normalize(), freq="D")
+    days = pd.date_range(start.normalize(), end.normalize(), freq=f"{settings.issue_every_days}D")
     issues = days + pd.Timedelta(f"{settings.issue_time}:00")
     return issues[(issues >= start) & (issues < end)]
 

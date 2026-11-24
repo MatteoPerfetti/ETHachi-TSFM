@@ -70,6 +70,13 @@ def validate_config() -> None:
          "BACKTEST_HORIZON_STEPS must be an integer >= 1"),
         (isinstance(config.BACKTEST_CONTEXT_STEPS, int) and config.BACKTEST_CONTEXT_STEPS >= 1,
          "BACKTEST_CONTEXT_STEPS must be an integer >= 1"),
+        (isinstance(config.BACKTEST_ISSUE_EVERY_DAYS, int) and config.BACKTEST_ISSUE_EVERY_DAYS >= 1,
+         "BACKTEST_ISSUE_EVERY_DAYS must be an integer >= 1"),
+        (len(config.CONTEXT_SWEEP_DAYS) >= 1
+         and all(isinstance(d, int) and d >= 1 for d in config.CONTEXT_SWEEP_DAYS),
+         "CONTEXT_SWEEP_DAYS must be a non-empty list of integers >= 1"),
+        (all(config.MODELS_REGISTRY.get(k, {}).get("type") == "tsfm" for k in config.CONTEXT_SWEEP_MODELS),
+         f"CONTEXT_SWEEP_MODELS must be TSFM keys of MODELS_REGISTRY, got {config.CONTEXT_SWEEP_MODELS}"),
         (isinstance(config.BACKTEST_LATENCY_STEPS, int) and config.BACKTEST_LATENCY_STEPS >= 0,
          "BACKTEST_LATENCY_STEPS must be an integer >= 0"),
         (config.BACKTEST_EVAL_WINDOW in ("all", "d+1"), "BACKTEST_EVAL_WINDOW must be 'all' or 'd+1'"),
