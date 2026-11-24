@@ -20,6 +20,7 @@ from src.MLtrad import (
     fit_traditional_model,
     predict_quantiles,
 )
+from src.pca import CovariatePCA, fit_covariate_pca
 
 
 class TraditionalMLAdapter(Forecaster):
@@ -36,6 +37,7 @@ class TraditionalMLAdapter(Forecaster):
         context_steps: int = config.TRADITIONAL_CONTEXT_STEPS,
         parameters: dict | None = None,
         issue_time: str = config.BACKTEST_ISSUE_TIME,
+        pca_components: int | float | None = None,
     ) -> None:
         if model_key not in config.TRADITIONAL_MODELS:
             raise ValueError(f"Unknown traditional model: {model_key}")
@@ -49,7 +51,9 @@ class TraditionalMLAdapter(Forecaster):
         self.context_steps = context_steps
         self.parameters = dict(parameters or {})
         self.issue_time = issue_time
-        self.name = f"{config.MODELS_REGISTRY[model_key]['name']} [{strategy}]"
+        self.pca_components = pca_components
+        self.pca: CovariatePCA | None = None
+        self.name =f"{config.MODELS_REGISTRY[model_key]['name']} [{strategy}]"
         self.min_context = (
             context_steps
             if strategy == "origin_aligned"
@@ -67,6 +71,7 @@ class TraditionalMLAdapter(Forecaster):
             "strategy": self.strategy,
             "context_steps": self.context_steps,
             "issue_time": self.issue_time,
+            "pca_components": self.pca_components,
             "parameters": self.parameters or "defaults",
         }
 
@@ -105,6 +110,11 @@ class TraditionalMLAdapter(Forecaster):
             )
             X_train = features.join(lagged, how="inner").dropna()
             y_train = target.reindex(X_train.index)
+
+        # After the dataset build, so the PCA sees exactly the covariate values each training row is given
+        self.pca = fit_covariate_pca(self.pca_components, covariates, X_train)
+        if self.pca is not None:
+            X_train = self.pca.transform(X_train)
 
         self.feature_columns = X_train.columns.tolist()
         logger.info(
@@ -167,6 +177,8 @@ class TraditionalMLAdapter(Forecaster):
                 features = self._origin_aligned_features(request)
             else:
                 features = self._fixed_gap_features(request)
+            if self.pca is not None:
+                features = self.pca.transform(features)
             features = features.reindex(columns=self.feature_columns)
             predictions = predict_quantiles(self.fitted_model, features)
             results.append(
@@ -185,6 +197,7 @@ def load_traditional(
     horizon_steps: int,
     latency_steps: int,
     issue_time: str,
+    pca_components: int | float | None = None,
 ) -> TraditionalMLAdapter:
     """Create an untuned/configured traditional benchmark adapter."""
     return TraditionalMLAdapter(
@@ -194,4 +207,5 @@ def load_traditional(
         latency_steps=latency_steps,
         parameters=config.TRADITIONAL_MODEL_PARAMETERS[model_key],
         issue_time=issue_time,
+        pca_components=pca_components,
     )

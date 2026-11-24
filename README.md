@@ -162,7 +162,7 @@ Each dashboard backtest creates a separate result record. Training remains a sep
 | `TRAIN_START` / `TRAIN_END` | 2024 | training period passed to `fit` (unused by zero-shot models) |
 | `BACKTEST_EVAL_WINDOW` | `"all"` | metrics on all 156 steps, or `"d+1"`: only the next day 00:00–23:45 (as Predico) |
 | `BACKTEST_PLOT_START` / `_END` / `_MODELS` | 1–14 Mar 2025, all | period and models of the forecast plot |
-| `DATA_USE_DWD` | `True` | merge the DWD weather file (needed for the wind covariates) |
+| `OPENMETEO_SOURCES["weather"]["dwd"]["use"]` | `True` | merge the DWD weather file (needed for the wind covariates) |
 
 `src/validate_config.py` checks these at start-up and lists every invalid setting.
 
