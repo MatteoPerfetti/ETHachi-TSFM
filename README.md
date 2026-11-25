@@ -101,6 +101,24 @@ python main.py --reuse    # reuse the saved results of the same settings: only m
 Output: the metrics table in the terminal, the forecasts in `results/<run>.parquet` (+ `.json` with settings,
 skipped days and timings) and a forecast plot in `plots/`.
 
+### Context-length sweep
+```bash
+python context_sweep.py                            # CONTEXT_SWEEP_DAYS x CONTEXT_SWEEP_MODELS from config.py
+python context_sweep.py --days 3 7 14 --reuse      # only the contexts/models not saved yet are run
+python context_sweep.py --days 30 --device cuda    # one context per job, e.g. on a GPU cluster
+python context_sweep.py --days 3 7 --every 7       # quick check: one forecast every 7 days
+python context_sweep.py --days 3 7 14 --table-only # rebuild the table from the saved runs
+```
+Each context length is an ordinary backtest run (`results/wind_ctx<steps>_...parquet`, also visible in the dashboard).
+Persistence runs once, with the shortest context, as reference. The table compares all runs on the issue days that
+**every** run kept, so a longer context that skips more days because of data gaps is scored on the same days.
+Output in `results/context_sweep/sweep_<contexts>.csv` (+ `.txt` with the printed report): per model and context
+RMSE and Winkler 80% on all 156 steps and on D+1, RMSE vs persistence, q10–q90 coverage and inference seconds per
+forecast; plus model × context pivots.
+
+Long contexts are slow on a laptop CPU: [euler/README.md](euler/README.md) runs the sweep on the ETH Euler cluster,
+one Slurm array task per context length, in parallel.
+
 ### Dashboard
 ```bash
 python -m streamlit run app.py
@@ -133,7 +151,9 @@ Each dashboard backtest creates a separate result record. Training remains a sep
 | `BACKTEST_MODELS` | persistence + XGBoost + 3 TSFMs | keys of `MODELS_REGISTRY` to run |
 | `BACKTEST_ISSUE_TIME` | `"09:00"` | daily issue time, UTC |
 | `BACKTEST_HORIZON_STEPS` | `156` | steps forecast from the issue time |
-| `BACKTEST_CONTEXT_STEPS` | `3 * 96` | target history given to the models (15 min steps) |
+| `BACKTEST_CONTEXT_DAYS` | `3` | target history given to the models, in days; `BACKTEST_CONTEXT_STEPS` (15 min steps) is derived from it |
+| `BACKTEST_ISSUE_EVERY_DAYS` | `1` | one forecast every N days of the test period (N > 1 for quick runs; the run name gets `_everyNd`) |
+| `CONTEXT_SWEEP_DAYS` / `CONTEXT_SWEEP_MODELS` | `[3, 7]` / 3 TSFMs | context lengths and models of `context_sweep.py` |
 | `BACKTEST_LATENCY_STEPS` | `0` | steps between the last available measurement and the issue time |
 | `TSFM_COVARIATES` | DWD wind variables | weather columns given to the TSFMs, per target |
 | `TRADITIONAL_STRATEGY` | `"fixed_gap"` | `origin_aligned` or `fixed_gap` for traditional ML |
@@ -153,6 +173,7 @@ The legacy `main.py` run name reflects settings, e.g. `wind_ctx288_h156_lat0_cov
 | File | What it does |
 |---|---|
 | `main.py` | Entry point: validate config → load dataset → backtest → save → print metrics → save plot. `--reuse` skips the backtest if the run exists. |
+| `context_sweep.py` | Context-length sweep of the TSFMs on the shared backtest (logic in `src/context_sweep.py`); one comparison table. |
 | `app.py` | Streamlit dashboard on the saved runs, plus a form to run new backtests. |
 | `config.py` | All settings: models, target, covariates, backtest, train/test periods, data sources, logging. |
 | `logger.py` | Project logger (console, optional file via `LOG_FILE`). |
