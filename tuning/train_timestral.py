@@ -209,6 +209,10 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     def lr_factor(step):
         if args.scheduler == "linear":
             return max(0.0, 1 - step / args.steps)
+        if args.scheduler == "quadratic":   # learning_rate -> final_learning_rate along (1 - t/T)^2
+            remaining = max(0.0, 1 - step / args.steps)
+            final = args.final_learning_rate
+            return (final + (args.learning_rate - final) * remaining ** 2) / args.learning_rate
         if args.warmup_steps and step < args.warmup_steps:
             return (step + 1) / args.warmup_steps
         progress = (step - args.warmup_steps) / max(1, args.steps - args.warmup_steps)
@@ -221,7 +225,7 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     print(f"Zero-shot validation: {baseline}", flush=True)
 
     checkpoint = run_dir / "finetuned-ckpt"
-    best, reference, history, bad_evaluations = None, None, [], 0
+    best, reference, history, bad_evaluations, stopped_at = None, None, [], 0, None
     for step in range(1, args.steps + 1):
         adapter.train()
         optimizer.zero_grad(set_to_none=True)
@@ -242,19 +246,20 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
                       **evaluate(forecaster, *validation_args)}
             history.append(scores)
             print(f"Step {step}/{args.steps}: {scores}", flush=True)
-            # Any improvement saves the checkpoint; only an improvement of at least --min-delta (in the units of
-            # the selection metric, MW for RMSE_D1) since the last such improvement resets the patience counter.
+            # Any improvement saves the checkpoint; only a relative improvement of at least --min-improvement since
+            # the last such improvement resets the patience counter.
             if best is None or scores[selection_metric] < best[selection_metric]:
                 best = scores
                 adapter.save_pretrained(checkpoint, save_embedding_layers=False)
-            if reference is None or scores[selection_metric] < reference - args.min_delta:
+            if reference is None or scores[selection_metric] < reference * (1 - args.min_improvement):
                 reference = scores[selection_metric]
                 bad_evaluations = 0
             else:
                 bad_evaluations += 1
             if args.patience and bad_evaluations >= args.patience:
-                print(f"Early stopping at step {step}: {bad_evaluations} evaluations without an improvement of "
-                      f"at least {args.min_delta} in {selection_metric}", flush=True)
+                stopped_at = step
+                print(f"Early stopping at step {step}: {bad_evaluations} evaluations without a "
+                      f"{args.min_improvement:.2%} improvement in {selection_metric}", flush=True)
                 break
 
     record = {**run_record, **vars(args), "device": device, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
@@ -268,7 +273,7 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
               "trainable_parameters": sum(param.numel() for param in trainable),
               "training_window_count": len(eligible), "latency_steps": 0, "optimizer": "AdamW",
               "validation_context_steps": validation_context, "checkpoint_metric": selection_metric,
-              "validation_interval_steps": validation_interval,
+              "validation_interval_steps": validation_interval, "early_stopped_at_step": stopped_at,
               "zero_shot": baseline, "best": best, "validation_history": history}
     manifest = run_dir / "run.json"
     run_record.update(record)
@@ -296,15 +301,18 @@ if __name__ == "__main__":
                         help="defaults to weeks with covariates and December for target-only training")
     parser.add_argument("--lora-targets", choices=("attention-mlp", "attention"), default="attention-mlp")
     parser.add_argument("--gradient-accumulation", type=int, default=1)
-    parser.add_argument("--scheduler", choices=("linear", "cosine"), default="linear")
+    parser.add_argument("--scheduler", choices=("linear", "cosine", "quadratic"), default="linear",
+                        help="linear: to 0; cosine: with optional warmup; quadratic: to --final-learning-rate")
     parser.add_argument("--warmup-steps", type=int, default=0)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--patience", type=int, default=0, help="Stop after this many evaluations without improvement; 0 disables")
     parser.add_argument("--validation-interval", type=int, default=None,
                         help="training steps between validations (default 100 with weeks validation, 50 with December)")
-    parser.add_argument("--min-delta", type=float, default=0.0,
-                        help="smallest decrease of the selection metric (MW for RMSE_D1) that counts as an improvement "
-                             "for --patience; the best checkpoint is still kept on any improvement")
+    parser.add_argument("--min-improvement", type=float, default=0.0,
+                        help="smallest relative decrease of the selection metric (0.004 = 0.4%%) that counts as an "
+                             "improvement for --patience; the best checkpoint is still kept on any improvement")
+    parser.add_argument("--final-learning-rate", type=float, default=1e-5,
+                        help="end value of the learning rate with --scheduler quadratic")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
@@ -315,10 +323,12 @@ if __name__ == "__main__":
         parser.error("learning rate must be positive and finite")
     if args.validation_interval is not None and args.validation_interval < 1:
         parser.error("--validation-interval must be positive")
-    if args.gradient_accumulation < 1 or args.warmup_steps < 0 or args.warmup_steps > args.steps or args.patience < 0 or not math.isfinite(args.min_delta) or args.min_delta < 0 or not math.isfinite(args.weight_decay) or args.weight_decay < 0:
-        parser.error("Invalid accumulation, warmup, patience, min delta or weight decay")
-    if args.scheduler == "linear" and args.warmup_steps:
+    if args.gradient_accumulation < 1 or args.warmup_steps < 0 or args.warmup_steps > args.steps or args.patience < 0 or not 0 <= args.min_improvement < 1 or not math.isfinite(args.weight_decay) or args.weight_decay < 0:
+        parser.error("Invalid accumulation, warmup, patience, min improvement (must be in [0, 1)) or weight decay")
+    if args.scheduler != "cosine" and args.warmup_steps:
         parser.error("warmup is available with --scheduler cosine")
+    if args.scheduler == "quadratic" and not 0 < args.final_learning_rate <= args.learning_rate:
+        parser.error("--final-learning-rate must be positive and at most --learning-rate")
     if args.validation == "weeks" and args.covariates == "none":
         parser.error("--validation weeks requires --covariates config")
     print(f"Saved and verified {train(args)}", flush=True)

@@ -18,23 +18,29 @@ RANK=${6:-8}
 SEED=${7:-42}
 VALIDATION=${VALIDATION:-weeks}
 EVAL_CONTEXT_STEPS=${EVAL_CONTEXT_STEPS:-2880}
-# Early stopping: validate every VALIDATION_INTERVAL steps and stop after PATIENCE validations in a row without
-# a D+1 RMSE decrease of at least MIN_DELTA MW (defaults: stop after 250 steps without a 1 MW gain; PATIENCE=0 = off).
+# Early stopping: validate every VALIDATION_INTERVAL steps and stop after PATIENCE validations in a row without a
+# relative improvement of at least MIN_IMPROVEMENT in the selection metric (D+1 RMSE with weeks validation,
+# pinball loss with December). Defaults: stop after 250 steps without a 0.4% gain; PATIENCE=0 = off.
 # The best checkpoint is kept on any improvement.
 VALIDATION_INTERVAL=${VALIDATION_INTERVAL:-50}
 PATIENCE=${PATIENCE:-5}
-MIN_DELTA=${MIN_DELTA:-1}
+MIN_IMPROVEMENT=${MIN_IMPROVEMENT:-0.004}
+# Learning-rate schedule: linear (to 0, default) or quadratic (to FINAL_LR along (1 - t/T)^2).
+SCHEDULER=${SCHEDULER:-linear}
+FINAL_LR=${FINAL_LR:-1e-5}
 
 cd "$SLURM_SUBMIT_DIR"
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export HF_HUB_OFFLINE=1
 
-echo "Training $RUN_ID: $CONTEXT_DAYS days, $STEPS steps on $(hostname), started $(date)"
+echo "Training $RUN_ID: $CONTEXT_DAYS days, $STEPS steps, lr $LEARNING_RATE ($SCHEDULER), validation $VALIDATION" \
+     "every $VALIDATION_INTERVAL steps, patience $PATIENCE, min improvement $MIN_IMPROVEMENT on $(hostname), started $(date)"
 .venv/bin/python -u -m tuning.train_timestral --run-id "$RUN_ID" --covariates config \
     --validation "$VALIDATION" --context-days "$CONTEXT_DAYS" --steps "$STEPS" \
     --batch-size "$BATCH_SIZE" --rank "$RANK" --learning-rate "$LEARNING_RATE" --seed "$SEED" \
-    --validation-interval "$VALIDATION_INTERVAL" --patience "$PATIENCE" --min-delta "$MIN_DELTA" --device cpu
+    --scheduler "$SCHEDULER" --final-learning-rate "$FINAL_LR" \
+    --validation-interval "$VALIDATION_INTERVAL" --patience "$PATIENCE" --min-improvement "$MIN_IMPROVEMENT" --device cpu
 
 echo "Evaluating $RUN_ID on 2025 with a $EVAL_CONTEXT_STEPS-step context, started $(date)"
 .venv/bin/python -u evaluate_tsfm.py --model timestral_209m --adapter-run-id "$RUN_ID" --covariates config \

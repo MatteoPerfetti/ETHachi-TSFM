@@ -173,11 +173,13 @@ def train_with_validation_context(pipeline, training, validation, context, horiz
     from peft import LoraConfig
     from transformers.trainer_callback import TrainerCallback
 
-    period = min(WEEKS_VALIDATION_INTERVAL, args.steps)
+    period = min(getattr(args, "validation_interval", None) or WEEKS_VALIDATION_INTERVAL, args.steps)
+    patience, min_improvement = getattr(args, "patience", 0), getattr(args, "min_improvement", 0.0)
 
     class Validate(TrainerCallback):
         def __init__(self):
             self.history, self.best, self.best_weights = [], None, None
+            self.reference, self.bad_evaluations, self.stopped_at = None, 0, None
 
         def on_step_end(self, trainer_args, state, control, model=None, **kwargs):
             if state.global_step % period and state.global_step != state.max_steps:
@@ -192,6 +194,16 @@ def train_with_validation_context(pipeline, training, validation, context, horiz
                 self.best = entry
                 self.best_weights = {name: parameter.detach().clone()
                                      for name, parameter in model.named_parameters() if parameter.requires_grad}
+            # Early stopping: only a relative improvement of at least min_improvement resets the counter.
+            if self.reference is None or scores[SELECTION_METRIC] < self.reference * (1 - min_improvement):
+                self.reference, self.bad_evaluations = scores[SELECTION_METRIC], 0
+            else:
+                self.bad_evaluations += 1
+            if patience and self.bad_evaluations >= patience and state.global_step != state.max_steps:
+                self.stopped_at = state.global_step
+                print(f"Early stopping at step {state.global_step}: {self.bad_evaluations} validations without a "
+                      f"{min_improvement:.2%} improvement in {SELECTION_METRIC}", flush=True)
+                control.should_training_stop = True
 
     validate = Validate()
     fit_batch_size = args.batch_size * (1 + len(training[0]["past_covariates"]))
@@ -213,6 +225,8 @@ def train_with_validation_context(pipeline, training, validation, context, horiz
     if not (run_dir / "finetuned-ckpt" / "adapter_config.json").is_file():
         raise RuntimeError("Chronos did not save a PEFT adapter")
     best = {"step": validate.best["step"], **evaluate(tuned, validation, validation_context, args.batch_size)}
+    if validate.stopped_at is not None:
+        best["early_stopped_at_step"] = validate.stopped_at
     return best, validate.history, fit_batch_size
 
 
@@ -406,7 +420,22 @@ if __name__ == "__main__":
                              "(needs --covariates config)")
     parser.add_argument("--validation-context-days", type=int, default=30,
                         help="history of each validation forecast with --validation weeks (as the 2025 evaluation)")
+    parser.add_argument("--validation-interval", type=int, default=None,
+                        help=f"training steps between validations with --validation weeks "
+                             f"(default {WEEKS_VALIDATION_INTERVAL})")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="with --validation weeks: stop after this many validations without an improvement of "
+                             "--min-improvement; 0 disables")
+    parser.add_argument("--min-improvement", type=float, default=0.0,
+                        help="smallest relative D+1 RMSE decrease (0.004 = 0.4%%) that resets --patience; "
+                             "the best checkpoint is still kept on any improvement")
     args = parser.parse_args()
+    if args.validation_interval is not None and args.validation_interval < 1:
+        parser.error("--validation-interval must be positive")
+    if args.patience < 0 or not 0 <= args.min_improvement < 1:
+        parser.error("--patience must be >= 0 and --min-improvement in [0, 1)")
+    if (args.patience or args.validation_interval) and args.validation != "weeks":
+        parser.error("--patience and --validation-interval need --validation weeks")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
         parser.error("--run-id must start with a letter or digit and contain only letters, digits, underscores or hyphens")
     if min(args.steps, args.batch_size, args.rank, args.context_days) < 1:

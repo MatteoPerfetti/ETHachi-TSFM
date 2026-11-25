@@ -33,6 +33,16 @@ RANK=${6:-8}
 SEED=${7:-42}
 EVAL_CONTEXT_STEPS=${EVAL_CONTEXT_STEPS:-2880}
 VALIDATION=${VALIDATION:-december}
+# Early stopping (weeks validation only): validate every VALIDATION_INTERVAL steps and stop after PATIENCE
+# validations in a row without a relative D+1 RMSE improvement of MIN_IMPROVEMENT (default: 250 steps without a
+# 0.4% gain; PATIENCE=0 = off). The best checkpoint is kept on any improvement.
+VALIDATION_INTERVAL=${VALIDATION_INTERVAL:-50}
+PATIENCE=${PATIENCE:-5}
+MIN_IMPROVEMENT=${MIN_IMPROVEMENT:-0.004}
+EARLY_STOP=()
+if [ "$VALIDATION" = "weeks" ]; then
+    EARLY_STOP=(--validation-interval "$VALIDATION_INTERVAL" --patience "$PATIENCE" --min-improvement "$MIN_IMPROVEMENT")
+fi
 
 cd "$SLURM_SUBMIT_DIR"                   # submit from the repository root
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK  # torch uses the allocated cores only
@@ -43,7 +53,7 @@ echo "Training $RUN_ID: $CONTEXT_DAYS days, $STEPS steps, lr $LEARNING_RATE, bat
      "seed $SEED, validation $VALIDATION on $(hostname), started $(date)"
 .venv/bin/python -u -m tuning.train_chronos2 --run-id "$RUN_ID" --backend peft --covariates config \
     --context-days "$CONTEXT_DAYS" --steps "$STEPS" --batch-size "$BATCH_SIZE" --rank "$RANK" \
-    --learning-rate "$LEARNING_RATE" --seed "$SEED" --validation "$VALIDATION" --device cpu
+    --learning-rate "$LEARNING_RATE" --seed "$SEED" --validation "$VALIDATION" ${EARLY_STOP[@]+"${EARLY_STOP[@]}"} --device cpu
 
 echo "Evaluating $RUN_ID on 2025 with a $EVAL_CONTEXT_STEPS-step context, started $(date)"
 .venv/bin/python -u evaluate_tsfm.py --model chronos2 --adapter-run-id "$RUN_ID" --covariates config \
