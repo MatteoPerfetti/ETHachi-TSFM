@@ -112,12 +112,21 @@ def covariate_batches(pipeline: Chronos2Pipeline, inputs: list[dict], context: i
         yield batch, first_row
 
 
+def next_day_steps(horizon: int) -> slice | None:
+    """Forecast steps of D+1 (next day 00:00-23:45 UTC) for a forecast issued at BACKTEST_ISSUE_TIME, as in
+    src.metrics; None if the horizon does not reach the end of D+1."""
+    first = int((pd.Timedelta(days=1) - pd.Timedelta(f"{config.BACKTEST_ISSUE_TIME}:00")) / STEP)
+    last = first + int(pd.Timedelta(days=1) / STEP)
+    return slice(first, last) if last <= horizon else None
+
+
 @torch.inference_mode()
 def evaluate(pipeline: Chronos2Pipeline, windows: torch.Tensor | list[dict], context: int, batch_size: int) -> dict:
-    """Validation loss, RMSE and Winkler80 of the target. `windows` is a tensor (wind-only) or Chronos input dicts."""
+    """Validation loss, RMSE and Winkler80 of the target, over all forecast steps and over D+1 (RMSE_D1,
+    Winkler80_D1), each averaged over the forecasts. `windows` is a tensor (wind-only) or Chronos input dicts."""
     pipeline.model.eval()
     levels = [list(pipeline.quantiles).index(q) for q in (0.1, 0.5, 0.9)]
-    losses, errors, intervals = [], [], []
+    losses, errors, intervals, errors_d1, intervals_d1 = [], [], [], [], []
     def wind_only(batch):
         out = forward_batch(pipeline, batch, context)
         return out.loss, out.quantile_preds, batch[:, context:].numpy()
@@ -138,11 +147,72 @@ def evaluate(pipeline: Chronos2Pipeline, windows: torch.Tensor | list[dict], con
         losses.extend([loss.item()] * len(actual))
         errors.extend(rmse(y, p) for y, p in zip(actual, q50))
         intervals.extend(winkler(y, lo, hi) for y, lo, hi in zip(actual, q10, q90))
+        d1 = next_day_steps(actual.shape[1])
+        if d1 is not None:
+            errors_d1.extend(rmse(y[d1], p[d1]) for y, p in zip(actual, q50))
+            intervals_d1.extend(winkler(y[d1], lo[d1], hi[d1]) for y, lo, hi in zip(actual, q10, q90))
     scores = {"loss": float(np.mean(losses)), "RMSE": float(np.mean(errors)),
               "Winkler80": float(np.mean(intervals))}
+    if errors_d1:
+        scores.update(RMSE_D1=float(np.mean(errors_d1)), Winkler80_D1=float(np.mean(intervals_d1)))
     if not all(map(math.isfinite, scores.values())):
         raise RuntimeError(f"Non-finite validation scores: {scores}")
     return scores
+
+
+SELECTION_METRIC = "RMSE_D1"  # "weeks" validation: keep the checkpoint with the lowest validation D+1 RMSE
+WEEKS_VALIDATION_INTERVAL = 100
+
+
+def train_with_validation_context(pipeline, training, validation, context, horizon, validation_context,
+                                  run_dir, args):
+    """PEFT fit validated by our own callback, because fit() would cut the validation windows to the training
+    context. Every WEEKS_VALIDATION_INTERVAL steps (and at the last step) the adapter is scored with
+    `validation_context`; the weights with the lowest SELECTION_METRIC are restored and saved at the end."""
+    from peft import LoraConfig
+    from transformers.trainer_callback import TrainerCallback
+
+    period = min(WEEKS_VALIDATION_INTERVAL, args.steps)
+
+    class Validate(TrainerCallback):
+        def __init__(self):
+            self.history, self.best, self.best_weights = [], None, None
+
+        def on_step_end(self, trainer_args, state, control, model=None, **kwargs):
+            if state.global_step % period and state.global_step != state.max_steps:
+                return
+            scores = evaluate(Chronos2Pipeline(model=model.get_base_model()), validation, validation_context,
+                              args.batch_size)
+            model.train()
+            entry = {"step": state.global_step, **scores}
+            self.history.append(entry)
+            print(f"Validation {entry}", flush=True)
+            if self.best is None or scores[SELECTION_METRIC] < self.best[SELECTION_METRIC]:
+                self.best = entry
+                self.best_weights = {name: parameter.detach().clone()
+                                     for name, parameter in model.named_parameters() if parameter.requires_grad}
+
+    validate = Validate()
+    fit_batch_size = args.batch_size * (1 + len(training[0]["past_covariates"]))
+    tuned = pipeline.fit(
+        inputs=training, context_length=context, min_past=context, prediction_length=horizon,
+        finetune_mode="lora", lora_config=LoraConfig(
+            r=args.rank, lora_alpha=2 * args.rank, target_modules=list(TARGET_MODULES),
+        ),
+        learning_rate=args.learning_rate, num_steps=args.steps, batch_size=fit_batch_size,
+        output_dir=run_dir, callbacks=[validate], seed=args.seed, optim="adamw_torch",
+        weight_decay=0.0, max_grad_norm=1.0, disable_tqdm=True,
+    )
+    if validate.best_weights is None:
+        raise RuntimeError("Training finished without a validated checkpoint")
+    result = tuned.model.load_state_dict(validate.best_weights, strict=False)
+    if result.unexpected_keys:
+        raise RuntimeError(f"Best weights do not match the adapter: {result.unexpected_keys[:3]}")
+    tuned.save_pretrained(run_dir / "finetuned-ckpt")
+    if not (run_dir / "finetuned-ckpt" / "adapter_config.json").is_file():
+        raise RuntimeError("Chronos did not save a PEFT adapter")
+    best = {"step": validate.best["step"], **evaluate(tuned, validation, validation_context, args.batch_size)}
+    return best, validate.history, fit_batch_size
 
 
 def train_with_peft(pipeline, training, validation, context, horizon, run_dir, args):
@@ -217,24 +287,35 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
     covariates = training_covariates(args)
     if covariates and args.backend != "peft":
         raise ValueError("Training with covariates needs --backend peft")
+    weeks = getattr(args, "validation", "december") == "weeks"
+    if weeks and not covariates:
+        raise ValueError("--validation weeks needs --covariates config")
+    validation_context = (int(pd.Timedelta(days=args.validation_context_days) / STEP) if weeks else context)
+    if weeks and next_day_steps(horizon) is None:
+        raise ValueError("--validation weeks selects on D+1, which the forecast horizon does not reach")
     if covariates:
-        training, validation, origins = load_covariate_inputs(context, horizon, covariates)
+        training, validation, origins = load_covariate_inputs(context, horizon, covariates,
+                                                              "weeks" if weeks else "december", validation_context)
         window_count = len(training[0]["target"]) - context - horizon + 1
     else:
         training, validation, origins = load_windows(context, horizon)
         window_count = len(training)
     pipeline = load_base(device)
-    if context > pipeline.model_context_length:
-        raise ValueError("Training history exceeds the base checkpoint context limit")
-    baseline = evaluate(pipeline, validation, context, args.batch_size)
-    print(f"{window_count:,} training windows, {len(validation)} validation origins, "
-          f"{context} context steps, {horizon} forecast steps, covariates {covariates or 'none'}, {device}",
+    if max(context, validation_context) > pipeline.model_context_length:
+        raise ValueError("Training or validation history exceeds the base checkpoint context limit")
+    baseline = evaluate(pipeline, validation, validation_context, args.batch_size)
+    print(f"{window_count:,} training windows, {len(validation)} validation origins "
+          f"({'held-out weeks' if weeks else 'December'}, {validation_context} context steps), "
+          f"{context} training context steps, {horizon} forecast steps, covariates {covariates or 'none'}, {device}",
           flush=True)
     print(f"Zero-shot validation: {baseline}", flush=True)
     metadata = {**record, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
                 "backend": args.backend, "target": "wind_MW", "context_steps": context,
                 "horizon_steps": horizon, "train_start": config.TRAIN_START,
-                "validation_start": VALIDATION_START.isoformat(),
+                "validation": "weeks" if weeks else "december",
+                "validation_context_steps": validation_context,
+                "selection_metric": SELECTION_METRIC if weeks else "eval_loss",
+                "validation_start": origins[0].isoformat() if weeks else VALIDATION_START.isoformat(),
                 "validation_end_exclusive": config.TRAIN_END,
                 "validation_origins": [origin.isoformat() for origin in origins],
                 "rank": args.rank, "alpha": 2 * args.rank, "seed": args.seed,
@@ -243,8 +324,13 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
                 "covariates": covariates, "context_days": args.context_days,
                 "target_modules": list(TARGET_MODULES), "issue_time_utc": config.BACKTEST_ISSUE_TIME,
                 "latency_steps": 0, "optimizer": "AdamW", "weight_decay": 0.0,
-                "validation_interval_steps": min(50, args.steps) if args.backend == "peft" else 50}
-    if args.backend == "peft":
+                "validation_interval_steps": (min(WEEKS_VALIDATION_INTERVAL, args.steps) if weeks
+                                              else min(50, args.steps) if args.backend == "peft" else 50)}
+    if weeks:
+        best, history, fit_batch_size = train_with_validation_context(
+            pipeline, training, validation, context, horizon, validation_context, run_dir, args)
+        metadata["fit_batch_rows"] = fit_batch_size
+    elif args.backend == "peft":
         best, history, fit_batch_size = train_with_peft(pipeline, training, validation, context, horizon,
                                                         run_dir, args)
         metadata["fit_batch_rows"] = fit_batch_size
@@ -255,7 +341,7 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
     manifest = run_dir / "run.json"
     record.update(metadata)
     write_record(manifest, record)
-    reloaded = evaluate(load_lora_run(run_dir, device), validation, context, args.batch_size)
+    reloaded = evaluate(load_lora_run(run_dir, device), validation, validation_context, args.batch_size)
     np.testing.assert_allclose(list(reloaded.values()), [best[key] for key in reloaded], rtol=1e-5, atol=1e-5)
     metadata.update(reloaded_validation=reloaded, elapsed_seconds=time.perf_counter() - started)
     record.update(metadata)
@@ -309,6 +395,12 @@ if __name__ == "__main__":
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--validation", choices=("december", "weeks"), default="december",
+                        help="december: December 2024 with the training context, best eval_loss; weeks: days 1-7 "
+                             "of every month (hidden from training) with --validation-context-days, best D+1 RMSE "
+                             "(needs --covariates config)")
+    parser.add_argument("--validation-context-days", type=int, default=30,
+                        help="history of each validation forecast with --validation weeks (as the 2025 evaluation)")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.run_id):
         parser.error("--run-id must start with a letter or digit and contain only letters, digits, underscores or hyphens")
@@ -318,4 +410,8 @@ if __name__ == "__main__":
         parser.error("learning rate must be positive and finite")
     if args.covariates != "none" and args.backend != "peft":
         parser.error("--covariates config needs --backend peft")
+    if args.validation == "weeks" and args.covariates == "none":
+        parser.error("--validation weeks needs --covariates config")
+    if args.validation_context_days < 1:
+        parser.error("--validation-context-days must be positive")
     print(f"Saved and verified {train(args)}", flush=True)

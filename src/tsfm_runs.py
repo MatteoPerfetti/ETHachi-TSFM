@@ -61,10 +61,11 @@ def training_records(root: Path | None = None) -> dict[str, dict]:
     runs = {}
     for path in sorted(root.glob("*/*/run.json")):
         model, run_id = path.parent.parent.name, path.parent.name
-        if model not in ("chronos2", "timestral_209m"):
+        if model not in ("chronos2", "timestral_209m", "delta_y"):
             continue
+        key = f"delta:{run_id}" if model == "delta_y" else f"lora:{model}:{run_id}"
         try:
-            runs[f"lora:{model}:{run_id}"] = json.loads(path.read_text(encoding="utf-8"))
+            runs[key] = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
     return runs
@@ -75,6 +76,8 @@ def available_adapters(root: Path | None = None) -> dict[str, dict]:
     root = root or config.BACKTEST_RESULTS_DIR / "finetuning"
     runs = {}
     for key in training_records(root):
+        if not key.startswith("lora:"):
+            continue
         _, model, run_id = key.split(":", 2)
         run_dir = root / model / run_id
         try:
@@ -85,6 +88,20 @@ def available_adapters(root: Path | None = None) -> dict[str, dict]:
             if not artifact.exists():
                 continue
             runs[key] = record
+        except (OSError, ValueError, KeyError):
+            continue
+    return runs
+
+
+def available_delta_adapters(root: Path | None = None) -> dict[str, dict]:
+    """Completed δY output adapters with a reload check, keyed delta:<run-id> (the backtest model key)."""
+    root = root or config.BACKTEST_RESULTS_DIR / "finetuning"
+    runs = {}
+    for path in sorted((root / "delta_y").glob("*/run.json")):
+        try:
+            record = read_record(path.parent)
+            if (path.parent / "adapter.safetensors").is_file() and record.get("base_model_key"):
+                runs[f"delta:{path.parent.name}"] = record
         except (OSError, ValueError, KeyError):
             continue
     return runs

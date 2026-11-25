@@ -11,9 +11,22 @@ from src.tsfm_runs import read_record, wind_path
 
 
 def evaluate(model_key: str, run_dir: Path | None, start: str, end: str,
-             context: int, horizon: int, device: str = "cpu", covariates: list[str] | None = None) -> Path:
-    """Rolling backtest of the zero-shot model (and the adapter); `covariates` are weather columns, [] = wind-only."""
+             context: int, horizon: int, device: str = "cpu", covariates: list[str] | None = None,
+             delta_run_id: str | None = None) -> Path:
+    """Rolling backtest of the zero-shot model (and the adapter); `covariates` are weather columns, [] = wind-only.
+
+    `delta_run_id` adds a δY output adapter (results/finetuning/delta_y/<id>) on top of its recorded base model.
+    """
     covariates = list(covariates or [])
+    if delta_run_id:
+        from src.tsfm_runs import available_delta_adapters
+
+        record = available_delta_adapters().get(f"delta:{delta_run_id}")
+        if record is None:
+            raise ValueError(f"delta-Y adapter run is missing or unverified: {delta_run_id}")
+        base = record["base_model_key"]
+        if base != model_key and not base.startswith(f"lora:{model_key}:"):
+            raise ValueError(f"delta-Y adapter {delta_run_id} corrects {base}, not {model_key}")
     if model_key not in config.TSFM_MODELS:
         raise ValueError(f"Unsupported TSFM: {model_key}")
     if context < 1 or horizon < 1:
@@ -44,6 +57,8 @@ def evaluate(model_key: str, run_dir: Path | None, start: str, end: str,
     models = [model_key]
     if run_dir:
         models.append(f"lora:{model_key}:{run_dir.name}")
+    if delta_run_id:
+        models.append(f"delta:{delta_run_id}")
     return run_recorded_backtest(dataset, models, settings)
 
 
@@ -58,10 +73,12 @@ if __name__ == "__main__":
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--covariates", choices=("none", "config"), default="none",
                         help="config: pass config.TSFM_COVARIATES['wind'] to the models (needed for covariate adapters)")
+    parser.add_argument("--delta-run-id", help="also evaluate this delta-Y output adapter (tuning/train_delta_y.py)")
     args = parser.parse_args()
-    if args.adapter_run_id and (Path(args.adapter_run_id).name != args.adapter_run_id or args.adapter_run_id in (".", "..")):
-        parser.error("adapter run ID must be a directory name")
+    for run_id in (args.adapter_run_id, args.delta_run_id):
+        if run_id and (Path(run_id).name != run_id or run_id in (".", "..")):
+            parser.error("run IDs must be directory names")
     path = (config.BACKTEST_RESULTS_DIR / "finetuning" / args.model / args.adapter_run_id
             if args.adapter_run_id else None)
     covariates = list(config.TSFM_COVARIATES["wind"]) if args.covariates == "config" else []
-    print(f"Saved evaluation: {evaluate(args.model, path, args.start, args.end, args.context_steps, args.horizon_steps, args.device, covariates)}")
+    print(f"Saved evaluation: {evaluate(args.model, path, args.start, args.end, args.context_steps, args.horizon_steps, args.device, covariates, args.delta_run_id)}")

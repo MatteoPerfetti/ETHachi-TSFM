@@ -40,6 +40,33 @@ def test_inputs_have_chronos_schema_and_december_windows():
         np.testing.assert_array_equal(window["past_covariates"]["c3"], window["target"] + 3 * OFFSET)
 
 
+def test_held_out_weeks_validate_with_30_days_and_hide_their_forecasts_from_training():
+    target, weather = synthetic(start="2024-01-01", end="2025-01-01")
+    context, horizon, validation_context = 96, 156, 2880
+    training, validation, origins = build_covariate_inputs(target, weather, context, horizon, COVARIATES,
+                                                           validation="weeks", validation_context=validation_context)
+    # January has no 30-day history in this data; days 1-7 of February to December do
+    assert len(origins) == 11 * 7
+    assert {(o.month, o.day, o.hour) for o in origins} == {(m, d, 9) for m in range(2, 13) for d in range(1, 8)}
+    for window, origin in zip(validation, origins):
+        start = target.index.get_loc(origin) - validation_context
+        np.testing.assert_array_equal(window["target"], np.arange(start, start + validation_context + horizon,
+                                                                  dtype=np.float32))
+    # training covers all of 2024; the target is NaN exactly over the validation forecasts, covariates are kept
+    series = training[0]["target"]
+    assert len(series) == len(target)
+    hidden = np.zeros(len(series), dtype=bool)
+    for origin in origins:
+        first = target.index.get_loc(origin)
+        hidden[first:first + horizon] = True
+    assert np.isnan(series[hidden]).all() and np.isfinite(series[~hidden]).all()
+    np.testing.assert_array_equal(training[0]["past_covariates"]["c3"], target.to_numpy() + 3 * OFFSET)
+    first_hidden = target.index.get_loc(pd.Timestamp("2024-03-01 09:00", tz="UTC"))
+    last_hidden = target.index.get_loc(pd.Timestamp("2024-03-08 23:45", tz="UTC"))
+    assert np.isnan(series[first_hidden:last_hidden + 1]).all()
+    assert np.isfinite(series[[first_hidden - 1, last_hidden + 1]]).all()
+
+
 def test_missing_values_in_training_period_raise():
     target, weather = synthetic()
     weather.iloc[500, 2] = np.nan

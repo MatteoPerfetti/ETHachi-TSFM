@@ -22,7 +22,7 @@ from src.feature_selection import load_selection, run_tree_selection, save_selec
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
 from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
 from src.validate_config import validate_config
-from src.tsfm_runs import available_adapters, training_records
+from src.tsfm_runs import available_adapters, available_delta_adapters, training_records
 
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
 # Charts use theme=None: our colors and legend layout (src/plotter.py) instead of Streamlit's chart theme
@@ -111,11 +111,16 @@ def new_backtest_form(expanded: bool) -> None:
         sources = list(config.ELIA_SOURCES)
         target = st.selectbox("Target source", sources, index=sources.index(config.TARGET_SOURCE))
         dataset = get_dataset(target)
-        adapters = available_adapters() if target == "wind" else {}
+        adapters = {**available_adapters(), **available_delta_adapters()} if target == "wind" else {}
         def model_label(key: str) -> str:
             if key not in adapters:
                 return config.MODELS_REGISTRY[key].get("name", {"chronos2": "Chronos-2 (zero-shot)", "timestral_209m": "Timestral-209M (zero-shot)", "timesfm3": "TimesFM-3 (zero-shot)"}.get(key, key))
             record = adapters[key]
+            if key.startswith("delta:"):
+                adapter = record.get("adapter_config", {})
+                return (f"{record.get('base_model_key', '?')} + δY — {key[6:]} ({adapter.get('arch', '?')}, "
+                        f"δ {adapter.get('delta', '?')}, context {record.get('context_steps', '?')}; "
+                        f"needs exactly its covariates)")
             _, family, run_id = key.split(":", 2)
             covariates = len(record.get("covariates") or [])
             return (f"{family} LoRA — {run_id} (context {record.get('context_steps', '?')}, "
@@ -212,7 +217,8 @@ def collect_results(runs: dict[str, dict]) -> tuple[list[dict], set[str]]:
         for model, score in scores.items():
             cfg = meta.get("model_configs", {}).get(model, {})
             if cfg.get("run_id"):
-                evaluated.add(f"lora:{cfg.get('model_key')}:{cfg['run_id']}")
+                evaluated.add(f"delta:{cfg['run_id']}" if cfg.get("model_key") == "delta_y"
+                              else f"lora:{cfg.get('model_key')}:{cfg['run_id']}")
             rows.append({"Evaluation": name, "Model": model, "Training run": cfg.get("run_id"),
                          "Target": meta.get("target", settings.get("target_source", "unknown")),
                          "Start UTC": settings.get("test_start"), "End UTC (exclusive)": settings.get("test_end"),
@@ -267,7 +273,7 @@ def experiment_history(evaluated: set[str]) -> None:
     """List evaluation attempts and the training settings recorded for each adapter."""
     with st.expander("Training and evaluation history", expanded=False):
         adapters = training_records()
-        selectable = available_adapters()
+        selectable = {**available_adapters(), **available_delta_adapters()}
         attempts = []
         for path in (config.BACKTEST_RESULTS_DIR / "backtest_attempts").glob("*.json"):
             try:
@@ -283,7 +289,7 @@ def experiment_history(evaluated: set[str]) -> None:
                          alt="Failed and interrupted backtest attempts")
         training_rows = []
         for key, record in adapters.items():
-            _, family, run_id = key.split(":", 2)
+            family, run_id = ("delta_y", key[6:]) if key.startswith("delta:") else key.split(":", 2)[1:]
             training_rows.append({"Model": family, "Run": run_id, "Training context": record.get("context_steps"),
                                   "Horizon": record.get("horizon_steps"), "Steps": record.get("steps"),
                                   "Batch size": record.get("batch_size"), "Rank": record.get("rank"),
@@ -295,7 +301,8 @@ def experiment_history(evaluated: set[str]) -> None:
             st.caption("Training runs without a recorded shared backtest can be selected in the sidebar.")
             st.dataframe(pd.DataFrame(training_rows), hide_index=True, width="stretch",
                          alt="Training parameters and rolling backtest status")
-            selected = st.selectbox("Training run details", list(adapters), format_func=lambda k: k.replace("lora:", ""))
+            selected = st.selectbox("Training run details", list(adapters),
+                                    format_func=lambda k: k.replace("lora:", "").replace("delta:", "delta_y:"))
             st.json(adapters[selected])
 
 
