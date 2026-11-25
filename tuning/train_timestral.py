@@ -1,4 +1,4 @@
-"""Train a target-only LoRA adapter for the cached Timestral-209M checkpoint."""
+"""Train a Timestral-209M LoRA adapter, optionally with known-future weather covariates."""
 
 import argparse
 import json
@@ -13,12 +13,11 @@ import torch
 from peft import LoraConfig, PeftModel, get_peft_model
 from timestral import TimestralForecaster
 from timestral.scaler import advancing_block_frames
-from torch.nn import functional as F
 
 import config
 from src.forecast import STEP
 from src.metrics import rmse, winkler
-from src.tuning_data import VALIDATION_START, load_windows
+from src.tuning_data import VALIDATION_START, load_covariate_inputs, load_windows
 from src.tsfm_runs import finish_training, start_training, write_record
 
 
@@ -39,23 +38,31 @@ def load_lora_run(run_dir: Path, device: str = "cpu") -> TimestralForecaster:
     return forecaster
 
 
-def training_loss(forecaster: TimestralForecaster, batch: torch.Tensor, context: int) -> torch.Tensor:
+def training_loss(forecaster: TimestralForecaster, batch: torch.Tensor, context: int,
+                  known_covariates: torch.Tensor | None = None) -> torch.Tensor:
     model = forecaster.model
     patch_size = forecaster.patch_size
     batch = batch.to(forecaster.device)
-    history, target = batch[:, :context], batch[:, context:]
+    inputs, mask = forecaster._as_context(batch[:, :context], None)
+    target = batch[:, context:]
     horizon = target.shape[-1]
     forecast_patches = math.ceil(horizon / patch_size)
-    padding = (-context) % patch_size
-    observed = F.pad(torch.ones_like(history, dtype=torch.bool), (padding, 0), value=False)
-    history = F.pad(history, (padding, 0))
+    known_covariates = forecaster._as_covariates(known_covariates, len(batch), context + horizon, "known_covariates")
+    rows, masks, roles, future, future_mask, _ = forecaster._assemble_rows(
+        inputs, mask, horizon, past_covariates=None, known_covariates=known_covariates,
+    )
+    variates = rows.shape[1]
+    groups = torch.arange(len(batch), device=batch.device).repeat_interleave(variates)
 
     # The public forecast() is inference-only. Capture the native head before
     # denormalization so gradients stay in normalized space.
     head_outputs = []
     with model.head.register_forward_hook(lambda _module, _inputs, output: head_outputs.append(output)):
-        model.predict_block(history, observed, torch.arange(len(batch), device=batch.device), forecast_patches)
-    quantiles = head_outputs[0]
+        model.predict_block(rows.flatten(0, 1), masks.flatten(0, 1), groups, forecast_patches,
+                            roles, future, future_mask)
+    # Covariate mode computes decoder tokens over context and horizon. The target is row 0 in each group.
+    quantiles = head_outputs[0][::variates, -forecast_patches * patch_size:]
+    history, observed = rows[:, 0], masks[:, 0]
 
     # Timestral updates the scale of later forecast patches using its earlier
     # predicted medians. Put the actuals in those same frames without differentiating through the frames.
@@ -70,36 +77,63 @@ def training_loss(forecaster: TimestralForecaster, batch: torch.Tensor, context:
         patch_scale = torch.cat((first_scale, patch_scale[:, 1:]), dim=1)
         loc = patch_loc.repeat_interleave(patch_size, dim=1)[:, :horizon]
         scale = patch_scale.repeat_interleave(patch_size, dim=1)[:, :horizon]
-        normalized = (target.double() - loc) / scale
+        valid = torch.isfinite(target)
+        normalized = (torch.where(valid, target.double(), loc) - loc) / scale
         if model.config.use_asinh:
             normalized = normalized.asinh()
 
-    error = normalized.to(quantiles.dtype).unsqueeze(-1) - quantiles[:, :horizon]
+    error = normalized[valid].to(quantiles.dtype).unsqueeze(-1) - quantiles[:, :horizon][valid]
     levels = quantiles.new_tensor(forecaster.quantile_levels)
     return torch.maximum(levels * error, (levels - 1) * error).mean()
 
 
 @torch.inference_mode()
-def evaluate(forecaster: TimestralForecaster, windows: torch.Tensor, context: int, batch_size: int) -> dict:
+def evaluate(forecaster: TimestralForecaster, windows: torch.Tensor, context: int, batch_size: int,
+             weather: torch.Tensor | None = None, d1: slice | None = None) -> dict:
     forecaster.model.eval()
-    losses, errors, intervals = [], [], []
-    for batch in windows.split(batch_size):
+    losses, errors, intervals, d1_errors = [], [], [], []
+    for start in range(0, len(windows), batch_size):
+        batch = windows[start:start + batch_size]
+        known = None if weather is None else weather[start:start + batch_size]
         actual = batch[:, context:].numpy()
-        forecast = forecaster.forecast(batch[:, :context], prediction_length=actual.shape[1])
+        forecast = forecaster.forecast(batch[:, :context], prediction_length=actual.shape[1], known_covariates=known)
         q10, q50, q90 = (forecast.quantile(q)[:, 0].cpu().numpy() for q in (0.1, 0.5, 0.9))
-        losses.extend([training_loss(forecaster, batch, context).item()] * len(batch))
+        losses.extend([training_loss(forecaster, batch, context, known).item()] * len(batch))
         errors.extend(rmse(y, p) for y, p in zip(actual, q50))
         intervals.extend(winkler(y, lo, hi) for y, lo, hi in zip(actual, q10, q90))
+        if d1 is not None:
+            d1_errors.extend(rmse(y[d1], p[d1]) for y, p in zip(actual, q50))
     scores = {"loss": float(np.mean(losses)), "RMSE": float(np.mean(errors)),
               "Winkler80": float(np.mean(intervals))}
+    if d1 is not None:
+        scores["RMSE_D1"] = float(np.mean(d1_errors))
     if not all(map(math.isfinite, scores.values())):
         raise RuntimeError(f"Non-finite validation scores: {scores}")
     return scores
 
 
+def covariate_windows(inputs: dict, covariates: list[str], context: int,
+                      horizon: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Use aligned rolling views and sample windows with at least one observed context and label value."""
+    length = context + horizon
+    target = torch.from_numpy(inputs["target"])
+    weather = torch.from_numpy(np.stack([inputs["past_covariates"][name] for name in covariates]))
+    observed = torch.isfinite(target).to(torch.int64)
+    counts = torch.cat((observed.new_zeros(1), observed.cumsum(dim=0)))
+    at_forecast_start = counts[context:-horizon]
+    past = at_forecast_start - counts[:-length]
+    future = counts[length:] - at_forecast_start
+    eligible = torch.where((past > 0) & (future > 0))[0]
+    if not len(eligible):
+        raise ValueError("No training windows with both observed context and forecast targets")
+    return target.unfold(0, length, 1), weather.unfold(-1, length, 1).transpose(0, 1), eligible
+
+
 def train(args: argparse.Namespace) -> Path:
     run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "timestral_209m" / args.run_id
-    record = start_training(run_dir, "timestral_209m", args, BASE_CHECKPOINT, BASE_REVISION, "finetuned-ckpt")
+    covariates = list(config.TSFM_COVARIATES["wind"]) if getattr(args, "covariates", "none") == "config" else []
+    record = start_training(run_dir, "timestral_209m", args, BASE_CHECKPOINT, BASE_REVISION, "finetuned-ckpt",
+                            covariates=covariates)
     try:
         return _train(args, run_dir, record)
     except BaseException as exc:
@@ -122,14 +156,44 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     horizon = config.BACKTEST_HORIZON_STEPS
 
     torch.manual_seed(args.seed)
-    windows, validation, origins = load_windows(context, horizon)
+    covariates = run_record["covariates"]
+    validation_scheme = getattr(args, "validation", None) or ("weeks" if covariates else "december")
+    weeks = validation_scheme == "weeks"
+    validation_context = int(pd.Timedelta(days=30) / STEP) if weeks else context
+    train_weather = validation_weather = d1 = None
+    if covariates:
+        series, held_out, origins = load_covariate_inputs(context, horizon, covariates,
+                                                          validation=validation_scheme,
+                                                          validation_context=validation_context)
+        windows, train_weather, eligible = covariate_windows(series[0], covariates, context, horizon)
+        validation = torch.from_numpy(np.stack([window["target"] for window in held_out]))
+        validation_weather = torch.from_numpy(np.stack([
+            [window["past_covariates"][name] for name in covariates] for window in held_out
+        ]))
+    else:
+        if weeks:
+            raise ValueError("Weeks validation requires --covariates config")
+        windows, validation, origins = load_windows(context, horizon)
+        eligible = torch.arange(len(windows))
+    if weeks:
+        day = pd.Timedelta(days=1)
+        next_day = int((day - pd.Timedelta(f"{config.BACKTEST_ISSUE_TIME}:00")) / STEP)
+        if horizon <= next_day:
+            raise ValueError("Forecast horizon does not reach D+1")
+        d1 = slice(next_day, next_day + int(day / STEP))
+    selection_metric = "RMSE_D1" if weeks else "loss"
+    validation_interval = 100 if weeks else 50
+
     forecaster = TimestralForecaster.from_pretrained(
         BASE_CHECKPOINT, revision=BASE_REVISION, device=device, local_files_only=True,
     )
-    if context > forecaster.max_context or horizon > forecaster.config.block_size * forecaster.patch_size:
-        raise ValueError("Context exceeds the checkpoint limit or horizon exceeds one Timestral forecast block")
+    if max(context, validation_context) > forecaster.max_context or horizon > forecaster.per_shot_horizon_patches * forecaster.patch_size:
+        raise ValueError("Training or validation context exceeds the checkpoint limit, or horizon exceeds one forecast block")
+    if covariates and not forecaster.supports_known_covariates:
+        raise ValueError("The Timestral checkpoint does not support known-future covariates")
 
-    baseline = evaluate(forecaster, validation, context, args.batch_size)
+    validation_args = (validation, validation_context, args.batch_size, validation_weather, d1)
+    baseline = evaluate(forecaster, *validation_args)
     targets = ATTENTION_MODULES if args.lora_targets == "attention" else TARGET_MODULES
     adapter = get_peft_model(forecaster.model, LoraConfig(
         r=args.rank, lora_alpha=2 * args.rank, target_modules=list(targets),
@@ -148,8 +212,9 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
         return 0.5 * (1 + math.cos(math.pi * min(1, max(0, progress))))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
     sampler = torch.Generator().manual_seed(args.seed)
-    print(f"{len(windows):,} training windows, {len(origins)} validation origins, "
-          f"{context} context steps, {horizon} forecast steps, {device}", flush=True)
+    print(f"{len(eligible):,} training windows, {len(origins)} {validation_scheme} validation origins, "
+          f"{context} training and {validation_context} validation context steps, "
+          f"{horizon} forecast steps, {len(covariates)} covariates, {device}", flush=True)
     print(f"Zero-shot validation: {baseline}", flush=True)
 
     checkpoint = run_dir / "finetuned-ckpt"
@@ -159,8 +224,9 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
         optimizer.zero_grad(set_to_none=True)
         batch_losses = []
         for _ in range(args.gradient_accumulation):
-            indices = torch.randint(len(windows), (args.batch_size,), generator=sampler)
-            loss = training_loss(forecaster, windows[indices], context)
+            indices = eligible[torch.randint(len(eligible), (args.batch_size,), generator=sampler)]
+            known = None if train_weather is None else train_weather[indices]
+            loss = training_loss(forecaster, windows[indices], context, known)
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite Timestral loss at step {step}")
             (loss / args.gradient_accumulation).backward()
@@ -168,12 +234,12 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
         torch.nn.utils.clip_grad_norm_(trainable, 1.0, error_if_nonfinite=True)
         optimizer.step()
         scheduler.step()
-        if step % 50 == 0 or step == args.steps:
+        if step % validation_interval == 0 or step == args.steps:
             scores = {"step": step, "training_batch_loss": float(np.mean(batch_losses)),
-                      **evaluate(forecaster, validation, context, args.batch_size)}
+                      **evaluate(forecaster, *validation_args)}
             history.append(scores)
             print(f"Step {step}/{args.steps}: {scores}", flush=True)
-            if best is None or scores["loss"] < best["loss"]:
+            if best is None or scores[selection_metric] < best[selection_metric]:
                 best = scores
                 bad_evaluations = 0
                 adapter.save_pretrained(checkpoint, save_embedding_layers=False)
@@ -184,20 +250,22 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
                 break
 
     record = {**run_record, **vars(args), "device": device, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
-              "backend": "peft", "target": "wind_MW", "covariates": [], "context_steps": context,
+              "backend": "peft", "target": "wind_MW", "covariates": covariates, "context_steps": context,
               "horizon_steps": horizon, "issue_time_utc": config.BACKTEST_ISSUE_TIME,
-              "train_start": config.TRAIN_START, "validation_start": VALIDATION_START.isoformat(),
+              "train_start": config.TRAIN_START, "validation": validation_scheme,
+              "validation_start": (origins[0].normalize() if weeks else VALIDATION_START).isoformat(),
               "validation_end_exclusive": config.TRAIN_END,
               "validation_origins": [origin.isoformat() for origin in origins],
               "alpha": 2 * args.rank, "target_modules": list(targets),
               "trainable_parameters": sum(param.numel() for param in trainable),
-              "training_window_count": len(windows), "latency_steps": 0, "optimizer": "AdamW",
-              "validation_interval_steps": 50,
+              "training_window_count": len(eligible), "latency_steps": 0, "optimizer": "AdamW",
+              "validation_context_steps": validation_context, "checkpoint_metric": selection_metric,
+              "validation_interval_steps": validation_interval,
               "zero_shot": baseline, "best": best, "validation_history": history}
     manifest = run_dir / "run.json"
     run_record.update(record)
     write_record(manifest, run_record)
-    reloaded = evaluate(load_lora_run(run_dir, device), validation, context, args.batch_size)
+    reloaded = evaluate(load_lora_run(run_dir, device), *validation_args)
     np.testing.assert_allclose(list(reloaded.values()), [best[key] for key in reloaded], rtol=1e-5, atol=1e-5)
     record.update(reloaded_validation=reloaded, elapsed_seconds=time.perf_counter() - start)
     run_record.update(record)
@@ -214,6 +282,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--covariates", choices=("none", "config"), default="none",
+                        help="config: use the configured wind weather covariates over context and horizon")
+    parser.add_argument("--validation", choices=("december", "weeks"),
+                        help="defaults to weeks with covariates and December for target-only training")
     parser.add_argument("--lora-targets", choices=("attention-mlp", "attention"), default="attention-mlp")
     parser.add_argument("--gradient-accumulation", type=int, default=1)
     parser.add_argument("--scheduler", choices=("linear", "cosine"), default="linear")
@@ -232,4 +304,6 @@ if __name__ == "__main__":
         parser.error("Invalid accumulation, warmup, patience or weight decay")
     if args.scheduler == "linear" and args.warmup_steps:
         parser.error("warmup is available with --scheduler cosine")
+    if args.validation == "weeks" and args.covariates == "none":
+        parser.error("--validation weeks requires --covariates config")
     print(f"Saved and verified {train(args)}", flush=True)

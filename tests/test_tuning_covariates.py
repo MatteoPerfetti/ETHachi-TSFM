@@ -80,6 +80,56 @@ def test_unknown_covariate_raises():
         build_covariate_inputs(target, weather, context=96, horizon=24, covariates=["nope"])
 
 
+def test_timestral_training_sampler_keeps_covariates_aligned_and_skips_empty_windows():
+    from tuning.train_timestral import covariate_windows
+
+    values = np.arange(10, dtype=np.float32)
+    target = values.copy()
+    target[1:6] = np.nan
+    windows, weather, eligible = covariate_windows(
+        {"target": target, "past_covariates": {"c1": values + OFFSET}}, ["c1"], context=3, horizon=3,
+    )
+    assert eligible.tolist() == [4]
+    np.testing.assert_array_equal(windows[eligible].numpy(), [target[4:10]])
+    np.testing.assert_array_equal(weather[eligible, 0].numpy(), [values[4:10] + OFFSET])
+
+
+def test_timestral_covariates_condition_target_loss_and_backpropagate_with_missing_targets():
+    from peft import LoraConfig, get_peft_model
+    from timestral import TimestralConfig, TimestralForecaster, TimestralModel
+
+    from tuning.train_timestral import TARGET_MODULES, training_loss
+
+    torch.manual_seed(0)
+    model = TimestralModel(TimestralConfig(
+        patch_size=8, d_model=32, num_heads=4, mlp_hidden_dim=64,
+        block_schedule=("time", "time_variate"), quantile_knots=(0.1, 0.5, 0.9),
+        block_size=4, context_length=64,
+    ))
+    for parameter in model.parameters():
+        torch.nn.init.normal_(parameter, std=0.1)
+    adapter = get_peft_model(model, LoraConfig(r=2, lora_alpha=4, target_modules=list(TARGET_MODULES)))
+    forecaster = TimestralForecaster(adapter.get_base_model())
+    context, horizon = 17, 11  # Exercise padding at both ends of the input.
+    batch = torch.randn(2, context + horizon)
+    batch[0, 2:5] = torch.nan
+    batch[:, context + 1:context + 5] = torch.nan
+    weather = torch.randn(2, 2, context + horizon)
+    changed = weather.clone()
+    changed[:, :, context:] += 10
+
+    loss = training_loss(forecaster, batch, context, weather)
+    assert torch.isfinite(loss)
+    assert abs((loss - training_loss(forecaster, batch, context, changed)).item()) > 1e-5
+    separate = torch.stack([training_loss(forecaster, row[None], context, cov[None])
+                            for row, cov in zip(batch, weather)]).mean()
+    torch.testing.assert_close(loss, separate)
+    loss.backward()
+    grads = [p.grad for p in adapter.parameters() if p.requires_grad]
+    assert all(grad is not None and torch.isfinite(grad).all() for grad in grads)
+    assert any(torch.count_nonzero(grad) for grad in grads)
+
+
 def test_random_training_windows_cut_target_and_covariates_at_the_same_timestamps():
     """30-day windows drawn by Chronos2Dataset (as in fit) keep target and covariates aligned."""
     from chronos.chronos2.dataset import Chronos2Dataset, DatasetMode
