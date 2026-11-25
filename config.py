@@ -172,7 +172,7 @@ RESOLUTIONCODE = "PT15M"
 STATISTICAL_PROPERTIES = ["mean", "std", "min", "max"]
 
 # Elia targets. "regions" are queried from Elia; "production_year" sets the production shares that weight the
-# weather sample points. Solar can sample over the provinces ("sample_regions") instead of one point ("use_regions").
+# weather sample points. Solar samples over the provinces ("sample_regions"), wind over its "regions".
 ELIA_SOURCES = {
     "wind": {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods031/",
@@ -183,7 +183,6 @@ ELIA_SOURCES = {
         "base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/",
         "regions": ["Belgium"],
         "production_year": 2025,
-        "use_regions": False,
         "sample_regions": [
             "Flemish-Brabant",
             "West-Flanders",
@@ -209,70 +208,70 @@ OPENMETEO_SETTINGS = {
 }
 
 OPENMETEO_SOURCES = {
-    "weather": {
-        "base_url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
-        "latitude": 50.2581,
-        "longitude": 4.9117,
-        "hourly_pv": [
-            "cloud_cover_low",
-            "cloud_cover_mid",
-            "cloud_cover_high",
-            "direct_radiation",
-            "diffuse_radiation",
-            "direct_normal_irradiance",
-        ],
-        "hourly_wind": [                
-                    "temperature_2m",
-                    "relative_humidity_2m",
-                    "pressure_msl",
-                    "surface_pressure",
-                    "wind_speed_10m",
-                    "wind_speed_80m",
-                    "wind_speed_120m",
-                    "wind_speed_180m",
-                    "wind_direction_10m",
-                    "wind_direction_80m",
-                    "wind_direction_120m",
-                    "wind_direction_180m",
-                    "wind_gusts_10m",
-                ],
-        "previous_runs": {
-            "base_url": "https://previous-runs-api.open-meteo.com/v1/forecast",
-            # Suffix of every requested variable: "" = most recent run, then the runs of the previous day 1 and day 2
-            "suffixes": ("", "_previous_day1", "_previous_day2"),
-        },
-        "dwd": {
-            "use": True,
-            "path": DATA_DIR / "dwd" / "gen_weather_dwd.parquet",
-        },
-        # Sample points and spatial weather aggregation, per Elia source (regions: see ELIA_SOURCES).
-        "weather_sampling": {
-            "solar": {
-                "n_samples": 200,
-                "seed": 42,
-                "cache_dir": DATA_DIR / "solar-region",
-                "nuts": {
-                    "Brussels": "BE10",
-                    "Antwerp": "BE21",
-                    "Limburg": "BE22",
-                    "East-Flanders": "BE23",
-                    "Flemish-Brabant": "BE24",
-                    "West-Flanders": "BE25",
-                    "Walloon-Brabant": "BE31",
-                    "Hainaut": "BE32",
-                    "Liège": "BE33",
-                    "Luxembourg": "BE34",
-                    "Namur": "BE35",
-                },
-                "nuts_url": "https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2024/4326/10M/nutsrg_2.json",
+    "base_url": "https://historical-forecast-api.open-meteo.com/v1/forecast",
+    "hourly_pv": [
+        "cloud_cover_low",
+        "cloud_cover_mid",
+        "cloud_cover_high",
+        "direct_radiation",
+        "diffuse_radiation",
+        "direct_normal_irradiance",
+    ],
+    "hourly_wind": [
+        "temperature_2m",
+        "relative_humidity_2m",
+        "pressure_msl",
+        "surface_pressure",
+        "wind_speed_10m",
+        "wind_speed_80m",
+        "wind_speed_120m",
+        "wind_speed_180m",
+        "wind_direction_10m",
+        "wind_direction_80m",
+        "wind_direction_120m",
+        "wind_direction_180m",
+        "wind_gusts_10m",
+    ],
+    "previous_runs": {
+        "base_url": "https://previous-runs-api.open-meteo.com/v1/forecast",
+        # Suffix of every requested variable: "" = most recent run, then the runs of the previous day 1 and day 2
+        "suffixes": ("", "_previous_day1", "_previous_day2"),
+        # Run a forecast row reads: previous day 1 up to this many hours after the issue time (D+1 00:00 for an
+        # issue at 09:00), previous day 2 after that. Conservative: a run is never used before it was published.
+        "day1_max_lead_hours": 15,
+    },
+    "dwd": {
+        "use": True,
+        "path": DATA_DIR / "dwd" / "gen_weather_dwd.parquet",
+    },
+    # Sample points and spatial weather aggregation, per Elia source (regions: see ELIA_SOURCES).
+    "weather_sampling": {
+        "solar": {
+            "n_samples": 200,
+            "seed": 42,
+            "cache_dir": DATA_DIR / "solar-region",
+            "nuts": {
+                "Brussels": "BE10",
+                "Antwerp": "BE21",
+                "Limburg": "BE22",
+                "East-Flanders": "BE23",
+                "Flemish-Brabant": "BE24",
+                "West-Flanders": "BE25",
+                "Walloon-Brabant": "BE31",
+                "Hainaut": "BE32",
+                "Liège": "BE33",
+                "Luxembourg": "BE34",
+                "Namur": "BE35",
             },
-            "wind": {
-                "n_samples": 50,
-                "seed": 42,
-                "farms_path": INPUTS_DIR / "belgium_wind_farms.csv",
-            },
+            "nuts_url": "https://raw.githubusercontent.com/eurostat/Nuts2json/master/pub/v2/2024/4326/10M/nutsrg_2.json",
         },
-    }
+        "wind": {
+            "n_samples": 20,
+            "seed": 42,
+            "cache_dir": DATA_DIR / "wind-region",
+            "farms_path": INPUTS_DIR / "belgium_wind_farms.csv",
+        },
+    },
 }
 
 LOG_LEVEL = "INFO"
