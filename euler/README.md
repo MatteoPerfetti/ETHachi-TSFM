@@ -94,6 +94,41 @@ scp "<username>@euler.ethz.ch:~/ETHachi-TSFM/results/wind_ctx*" results/
 scp -r <username>@euler.ethz.ch:~/ETHachi-TSFM/results/context_sweep results/
 ```
 
+## 5. Chronos-2 LoRA with covariates
+
+[train_chronos2_cov.sbatch](train_chronos2_cov.sbatch) trains one Chronos-2 adapter with the weather covariates and
+then evaluates it on 2025 against zero-shot Chronos-2, both with a 30-day context and the covariates.
+
+From PowerShell on the PC (`ssh` and `scp` are built into Windows):
+
+```powershell
+ssh <username>@euler.ethz.ch
+```
+
+Then on Euler:
+
+```bash
+cd ~/ETHachi-TSFM
+git fetch && git checkout Chronos-finetuning && git pull
+mkdir -p results/euler_logs
+sbatch --time=02:00:00 euler/train_chronos2_cov.sbatch cov30-smoke 3 30   # first: time a few steps
+sbatch euler/train_chronos2_cov.sbatch cov30-r8 200 30                    # main run, 30-day training context
+sbatch euler/train_chronos2_cov.sbatch cov3-r8 200 3                      # comparison: 3-day training context
+squeue -u $USER
+tail -f results/euler_logs/chronos2-cov_<job_id>.out
+exit
+```
+
+Back in PowerShell, from the project folder: copy the adapter and its evaluation, then add them to the local MLflow
+(the importer skips runs it already has):
+
+```powershell
+scp -r "<username>@euler.ethz.ch:~/ETHachi-TSFM/results/finetuning/chronos2/cov30-r8" results\finetuning\chronos2\
+scp "<username>@euler.ethz.ch:~/ETHachi-TSFM/results/wind_ctx2880_*" results\
+.\.venv\Scripts\python.exe import_experiments.py
+.\.venv\Scripts\python.exe -m mlflow ui --backend-store-uri sqlite:///results/mlflow.db --port 5000
+```
+
 ## Troubleshooting
 
 - **Out of memory** (`oom-kill` in the log, state `OUT_OF_MEMORY` in `myjobs`): re-submit that task with more memory,

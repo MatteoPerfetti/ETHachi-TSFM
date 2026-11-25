@@ -137,7 +137,7 @@ Use `python -m streamlit` so it runs with the Python that has the models install
 To compare a saved LoRA run with other models:
 
 1. Choose `wind` as the target, then select the saved adapter and any zero-shot or other models under **Models and saved adapters**. Adapter labels show the run ID, training context, steps and rank.
-2. Choose the first and last issue dates (both included), inference context, horizon and covariates. Choose no weather covariates to match the current wind-only training inputs.
+2. Choose the first and last issue dates (both included), inference context, horizon and covariates. For an adapter trained with covariates, choose exactly its covariates (the label says "N covariates"); a wind-only adapter works with or without weather.
 3. Select **Run backtest**. The selected models are evaluated on the same valid origins; this does not retrain the adapter.
 4. Open **Training and evaluation history** to inspect training-run details, see which runs have a recorded rolling backtest, and compare saved scores. Select a saved backtest in the sidebar to view its metrics and forecasts.
 
@@ -185,11 +185,11 @@ The legacy `main.py` run name reflects settings, e.g. `wind_ctx288_h156_lat0_cov
 | `src/dataset.py` | Adapter between extraction and forecasting: `load_dataset()` returns target and weather on a regular 15 min UTC grid. A new extraction strategy only needs changes here. |
 | `src/forecast.py` | Shared types: `ForecastRequest` (validated inputs of one forecast), `ForecastResult` (q10/q50/q90), `Forecaster` (interface of every model). |
 | `src/models_tsfm.py` | Inference adapters for Chronos-2, Timestral-209M and TimesFM-3: load weights once, batch requests, pass supported covariates, time inference. Fine-tuning is performed by the standalone trainers. |
-| `tuning/train_chronos2.py`, `tuning/train_timestral.py` | Independent wind-only LoRA training and adapter reload checks. |
+| `tuning/train_chronos2.py`, `tuning/train_timestral.py` | Independent LoRA training (Chronos-2 optionally with the weather covariates) and adapter reload checks. |
 | `tuning/train_moirai.py`, `tuning/train_timesfm.py` | Placeholders for future training implementations. |
-| `src/tuning_data.py` | Shared wind-only training and validation windows for the LoRA trainers. |
+| `src/tuning_data.py` | Training and validation windows for the LoRA trainers: wind-only tensors, or Chronos-2 input dicts with the weather covariates. |
 | `src/tsfm_runs.py` | Local run manifests, atomic JSON writes and artifact fingerprints. |
-| `evaluate_tsfm.py` | Standalone wind-only command using the shared rolling backtest for one zero-shot TSFM, optionally paired with its LoRA adapter. |
+| `evaluate_tsfm.py` | Standalone command using the shared rolling backtest for one zero-shot TSFM, optionally paired with its LoRA adapter; wind-only or with the weather covariates. |
 | `src/models_traditional.py` | Shared-backtest adapter for XGBoost, LightGBM, CatBoost, NGBoost and TabNet; builds either feature mode and returns q10/q50/q90. |
 | `src/MLtrad.py` | Traditional estimators, preserved parameter defaults, quantile prediction, probabilistic scoring, time-based cross-validation and offline Optuna tuning. |
 | `src/baselines.py` | Persistence: repeats the last 156 observed values (q50 only). |
@@ -258,12 +258,12 @@ flowchart LR
 | `src/tsfm_runs.py` | Creates local run records, fingerprints data, captures selected package and Git information, and atomically updates JSON manifests. |
 | `src/models_tsfm.py` and `src/forecast.py` | Model-specific inference adapters and the shared request/result interface. Each TSFM library is imported when its model is loaded. |
 | `src/backtest.py` | Shared rolling evaluation: loads selected models, builds requests for common valid origins, collects forecasts and scores them. A saved adapter is a selectable model variant. |
-| `evaluate_tsfm.py` | Standalone wind-only command that calls the shared backtest with one zero-shot TSFM and optionally its saved adapter. |
+| `evaluate_tsfm.py` | Standalone command that calls the shared backtest with one zero-shot TSFM and optionally its saved adapter, wind-only or with the weather covariates. |
 | `src/metrics.py` | Scores q50 RMSE and q10–q90 Winkler80 in MW; the reported score is the mean of the per-origin scores. |
 
-The current standalone trainers use `wind_MW`, aggregated across Belgian regions, with no covariates. Training windows lie in January–November 2024; December 2024 daily origins at 09:00 UTC are used for validation and checkpoint selection. The default context is 288 steps (three days) and the horizon is 156 steps (39 hours). The proposed final holdout is 2025 after model and settings are fixed. Evaluation is rolling: later 2025 origins may use earlier observed 2025 values as history, while adapter weights remain fixed.
+The current standalone trainers use `wind_MW`, aggregated across Belgian regions; Chronos-2 can add the weather covariates. Training windows lie in January–November 2024; December 2024 daily origins at 09:00 UTC are used for validation and checkpoint selection. The default context is 288 steps (three days) and the horizon is 156 steps (39 hours). The proposed final holdout is 2025 after model and settings are fixed. Evaluation is rolling: later 2025 origins may use earlier observed 2025 values as history, while adapter weights remain fixed.
 
-The shared backtest builds a contiguous history for each origin. Zero-shot and adapter variants of the same model receive matching requests and use the adapter's recorded base revision. It records and skips origins without complete history or labels. The inference context length is independent of the context used during adapter training. The dashboard can pass its selected weather covariates during inference; the existing LoRA trainers are wind-only, and the standalone `evaluate_tsfm.py` command uses no covariates. Retrieval or RAFT-style context policies and training with covariates are not yet implemented; a non-contiguous context will need a suitable request contract.
+The shared backtest builds a contiguous history for each origin. Zero-shot and adapter variants of the same model receive matching requests and use the adapter's recorded base revision. It records and skips origins without complete history or labels. The inference context length is independent of the context used during adapter training. The dashboard can pass its selected weather covariates during inference, and `evaluate_tsfm.py --covariates config` does the same from the command line. Chronos-2 adapters can be trained with the weather covariates (`--covariates config`); Timestral adapters are wind-only. Retrieval or RAFT-style context policies are not yet implemented; a non-contiguous context will need a suitable request contract.
 
 ### Model support
 
@@ -333,12 +333,15 @@ The adapter commands compare zero-shot and the newly trained adapter on the same
 
 ## Full training and evaluation
 
-The standalone trainers use cached Belgian wind generation, without covariates. They never train XGBoost. Use a new ID for each training run:
+The standalone trainers use cached Belgian wind generation. Chronos-2 (PEFT backend) can also train with the weather covariates `TSFM_COVARIATES["wind"]` as known future inputs (`--covariates config`); Timestral and the custom Chronos backend are wind-only. They never train XGBoost. Use a new ID for each training run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m tuning.train_chronos2 --backend peft --run-id chronos-example --steps 200 --device cpu
+.\.venv\Scripts\python.exe -m tuning.train_chronos2 --backend peft --covariates config --context-days 30 --run-id chronos-cov30 --steps 200 --device cpu
 .\.venv\Scripts\python.exe -m tuning.train_timestral --run-id timestral-example --steps 200 --device cpu
 ```
+
+With covariates, every training window is one Chronos group of 1 + 7 rows: the wind target and the 7 weather series, cut at the same timestamps (`context` steps of history, 156 future steps whose weather values are given to the model). Chronos draws the windows at random 15-minute cut points in January–November 2024 and computes the loss on the target row only. `--batch-size` counts windows; the trainer passes `batch_size * 8` rows to `Chronos2Pipeline.fit`. The 30-day context follows the context-length sweep (Chronos-2 RMSE 472.5 at 3 days, 334.1 at 30 days, 333.0 at 60 days). On Euler: `sbatch euler/train_chronos2_cov.sbatch <run-id> [steps] [context-days]` trains and then evaluates 2025 with a 30-day context.
 
 New runs under `results/finetuning/<model>/<run-id>/` record arguments, data fingerprint, base revision, split, scores, adapter path and reload verification. `run.json` has a status; only a completed run with a reload check can be evaluated. Existing verified run records and both Chronos adapter formats remain supported. A run interrupted before completion may remain `running` and must not be reused.
 
@@ -348,9 +351,10 @@ Evaluate one model, or compare its base and adapter on the same origins:
 .\.venv\Scripts\python.exe evaluate_tsfm.py --model chronos2 --adapter-run-id chronos-example --start 2025-01-01T00:00:00Z --end 2026-01-01T00:00:00Z
 .\.venv\Scripts\python.exe evaluate_tsfm.py --model timestral_209m --adapter-run-id timestral-example --context-steps 672
 .\.venv\Scripts\python.exe evaluate_tsfm.py --model timesfm3
+.\.venv\Scripts\python.exe evaluate_tsfm.py --model chronos2 --adapter-run-id chronos-cov30 --covariates config --context-steps 2880
 ```
 
-Dates bound issue times with an exclusive end. The default is 09:00 UTC, zero latency, a 156-step horizon and 288 contiguous history steps. Inference context is independent of training. For adapter comparisons the exact base revision must already be cached. The command saves a unique JSON/Parquet pair directly under `results/` and does not reuse old results. Origins with incomplete history or labels are skipped, including the end of 2025 if the dataset has no later labels. This command is wind-only.
+Dates bound issue times with an exclusive end. The default is 09:00 UTC, zero latency, a 156-step horizon and 288 contiguous history steps. Inference context is independent of training. For adapter comparisons the exact base revision must already be cached. The command saves a unique JSON/Parquet pair directly under `results/` and does not reuse old results. Origins with incomplete history or labels are skipped, including the end of 2025 if the dataset has no later labels. Without `--covariates` the command is wind-only; `--covariates config` loads the full dataset and gives `TSFM_COVARIATES["wind"]` to both the zero-shot model and the adapter. An adapter trained with covariates can only be evaluated with exactly those covariates; wind-only adapters can be evaluated with or without them.
 ## Experiment tracking with MLflow
 
 Training and rolling backtest results can be recorded locally in `results/mlflow.db` and `results/mlflow_artifacts/`. These files are ignored by Git; back them up alongside `results/`.

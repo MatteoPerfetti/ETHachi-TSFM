@@ -1,4 +1,8 @@
-"""Shared wind-only windows for the standalone foundation-model trainers."""
+"""Training and validation windows for the standalone foundation-model trainers.
+
+`load_windows` gives wind-only tensors (Chronos-2 custom/PEFT and Timestral). `load_covariate_inputs` gives the same
+period as Chronos-2 input dicts with the weather covariates, for `Chronos2Pipeline.fit`.
+"""
 
 import numpy as np
 import pandas as pd
@@ -37,3 +41,59 @@ def load_windows(context: int, horizon: int) -> tuple[torch.Tensor, torch.Tensor
     if not validation:
         raise ValueError("No complete December validation windows")
     return training, torch.tensor(np.stack(validation)), origins
+
+
+def _chronos_input(target: pd.Series, weather: pd.DataFrame, covariates: list[str]) -> dict:
+    """One Chronos-2 input dict; future_covariates=None marks every covariate as known into the future."""
+    return {"target": target.to_numpy(dtype=np.float32),
+            "past_covariates": {name: weather[name].to_numpy(dtype=np.float32) for name in covariates},
+            "future_covariates": {name: None for name in covariates}}
+
+
+def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: int, horizon: int,
+                           covariates: list[str]) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
+    """Training series (TRAIN_START to VALIDATION_START) and December validation windows with covariates.
+
+    The training input is one continuous series: Chronos2Dataset draws random windows of `context` steps plus
+    `horizon` steps from it, cutting target and covariates at the same timestamps. Each validation input covers
+    `context + horizon` steps ending at the horizon of one 09:00 origin; Chronos uses its last `horizon` steps
+    as labels and the known covariates over them as future inputs.
+    """
+    if not covariates:
+        raise ValueError("No covariates given; use load_windows for wind-only training")
+    missing = sorted(set(covariates) - set(weather.columns))
+    if missing:
+        raise ValueError(f"Covariates not in the weather data: {missing}")
+    frame = weather[covariates].join(target.rename("__target__"), how="outer")
+
+    train_index = pd.date_range(pd.Timestamp(config.TRAIN_START), VALIDATION_START, freq=STEP, inclusive="left")
+    train = frame.reindex(train_index)
+    if len(train) < context + horizon:
+        raise ValueError("Training history is too short for the requested context and horizon")
+    if not np.isfinite(train.to_numpy(dtype=np.float64)).all():
+        bad = train.columns[train.isna().any()].tolist()
+        raise ValueError(f"Training period has missing values in {bad}")
+    training = [_chronos_input(train["__target__"], train, covariates)]
+
+    validation, origins = [], []
+    issue_offset = pd.Timedelta(f"{config.BACKTEST_ISSUE_TIME}:00")
+    train_end = pd.Timestamp(config.TRAIN_END)
+    for origin in pd.date_range(VALIDATION_START + issue_offset, train_end, freq="D", inclusive="left"):
+        if origin + (horizon - 1) * STEP >= train_end:
+            break
+        window = frame.reindex(pd.date_range(origin - context * STEP, periods=context + horizon, freq=STEP))
+        if np.isfinite(window.to_numpy(dtype=np.float64)).all():
+            validation.append(_chronos_input(window["__target__"], window, covariates))
+            origins.append(origin)
+    if not validation:
+        raise ValueError("No complete December validation windows")
+    return training, validation, origins
+
+
+def load_covariate_inputs(context: int, horizon: int,
+                          covariates: list[str]) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
+    """Wind target and weather exactly as the backtest sees them (src.dataset.load_dataset), as Chronos inputs."""
+    from src.dataset import load_dataset
+
+    dataset = load_dataset("wind")
+    return build_covariate_inputs(dataset.target, dataset.weather, context, horizon, covariates)

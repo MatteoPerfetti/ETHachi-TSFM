@@ -80,6 +80,10 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         record = records[model_key]
         if settings.target_source != "wind" or record.get("target") != "wind_MW":
             raise ValueError(f"{model_key} was trained on wind_MW; select the wind target")
+        trained_with = record.get("covariates") or []
+        if trained_with and sorted(trained_with) != sorted(settings.covariates):
+            raise ValueError(f"{model_key} was trained with the covariates {trained_with}; "
+                             f"select exactly these for the backtest (got {list(settings.covariates)})")
         run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / family / run_id
         artifact = run_dir / record.get("adapter_path", "finetuned-ckpt" if record.get("backend") == "peft" else "adapter.safetensors")
         files = [artifact] if artifact.is_file() else sorted(p for p in artifact.rglob("*") if p.is_file())

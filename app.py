@@ -10,6 +10,7 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -116,8 +117,10 @@ def new_backtest_form(expanded: bool) -> None:
                 return config.MODELS_REGISTRY[key].get("name", {"chronos2": "Chronos-2 (zero-shot)", "timestral_209m": "Timestral-209M (zero-shot)", "timesfm3": "TimesFM-3 (zero-shot)"}.get(key, key))
             record = adapters[key]
             _, family, run_id = key.split(":", 2)
+            covariates = len(record.get("covariates") or [])
             return (f"{family} LoRA — {run_id} (context {record.get('context_steps', '?')}, "
-                    f"steps {record.get('steps', '?')}, rank {record.get('rank', '?')})")
+                    f"steps {record.get('steps', '?')}, rank {record.get('rank', '?')}, "
+                    f"{f'{covariates} covariates' if covariates else 'wind-only'})")
         with st.form("new_backtest"):
             models = st.multiselect("Models to compare", [*RUNNABLE_MODELS, *adapters],
                                     default=[m for m in config.BACKTEST_MODELS if m in RUNNABLE_MODELS],
@@ -369,7 +372,8 @@ def single_tab(predictions: pd.DataFrame, models: list[str], window: str, bands:
 
 def training_form() -> None:
     """Start the existing standalone PEFT trainers without blocking the dashboard."""
-    st.caption("Train a new wind-only LoRA adapter. Training uses no weather covariates; weather can be selected separately for evaluation.")
+    st.caption("Train a new LoRA adapter on wind. Chronos-2 can also train with the weather covariates of config.py; "
+               "an adapter trained with covariates must be evaluated with exactly those covariates.")
     with st.form("training_form"):
         family = st.selectbox("Model to fine-tune", ["chronos2", "timestral_209m"], format_func=lambda x: {"chronos2": "Chronos-2", "timestral_209m": "Timestral-209M"}[x])
         run_id = st.text_input("Unique training run name", help="Letters, digits, hyphens and underscores.")
@@ -380,6 +384,8 @@ def training_form() -> None:
         learning_rate = st.number_input("Learning rate", min_value=0.00000001, max_value=1.0, value=0.00001, format="%.8f")
         seed = st.number_input("Random seed", min_value=0, max_value=2147483647, value=42)
         device = st.selectbox("Training device", ["auto", "cpu", "cuda"])
+        with_covariates = st.checkbox("Train with weather covariates (Chronos-2 only)",
+                                      help=f"Uses {config.TSFM_COVARIATES['wind']}. Batch size counts windows.")
         submitted = st.form_submit_button("Start training")
     if submitted:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", run_id):
@@ -395,6 +401,11 @@ def training_form() -> None:
         module = "tuning.train_chronos2" if family == "chronos2" else "tuning.train_timestral"
         cmd = [sys.executable, "-u", "-m", module, "--run-id", run_id, "--context-days", str(context), "--steps", str(steps), "--batch-size", str(batch_size), "--rank", str(rank), "--learning-rate", str(learning_rate), "--seed", str(seed), "--device", device]
         if family == "chronos2": cmd.extend(["--backend", "peft"])
+        if with_covariates:
+            if family != "chronos2":
+                st.error("Training with covariates is implemented for Chronos-2 only.")
+                return
+            cmd.extend(["--covariates", "config"])
         try:
             with log_path.open("x", encoding="utf-8") as log:
                 proc = subprocess.Popen(cmd, cwd=str(config.BACKTEST_RESULTS_DIR.parent), stdout=log, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

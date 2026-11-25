@@ -90,7 +90,8 @@ def available_adapters(root: Path | None = None) -> dict[str, dict]:
     return runs
 
 
-def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: str, adapter: str) -> dict:
+def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: str, adapter: str,
+                   covariates: list[str] | None = None) -> dict:
     run_dir.mkdir(parents=True, exist_ok=False)
     try:
         try:
@@ -112,7 +113,11 @@ def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: s
                   "started_at": now(), "git_commit": commit, "git_dirty": dirty, "packages": packages,
                   "base_checkpoint": checkpoint, "base_revision": revision, "adapter_path": adapter,
                   "parameters": vars(args).copy(), "dataset": {"path": str(source),
-                  "sha256": fingerprint(source), "resolution": config.RESOLUTIONCODE}, "covariates": []}
+                  "sha256": fingerprint(source), "resolution": config.RESOLUTIONCODE},
+                  "covariates": list(covariates or [])}
+        if covariates:
+            weather = Path(config.DATA_DWD_PATH)
+            record["dataset"]["weather"] = {"path": str(weather), "sha256": fingerprint(weather)}
         write_record(run_dir / "run.json", record)
         return record
     except BaseException:

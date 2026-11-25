@@ -1,4 +1,4 @@
-"""Train and validate one target-only Chronos-2 LoRA adapter on cached wind data."""
+"""Train and validate one Chronos-2 LoRA adapter on cached wind data, optionally with the weather covariates."""
 
 import argparse
 import json
@@ -18,7 +18,7 @@ from torch import nn
 import config
 from src.forecast import STEP
 from src.metrics import rmse, winkler
-from src.tuning_data import VALIDATION_START, load_windows
+from src.tuning_data import VALIDATION_START, load_covariate_inputs, load_windows
 from src.tsfm_runs import finish_training, start_training, write_record
 
 
@@ -93,17 +93,49 @@ def forward_batch(pipeline: Chronos2Pipeline, batch: torch.Tensor, context: int)
     )
 
 
+def covariate_batches(pipeline: Chronos2Pipeline, inputs: list[dict], context: int, horizon: int, batch_size: int):
+    """Validation batches with covariates, built by Chronos itself exactly as during fit().
+
+    Yields (model inputs, target-row mask). Every window is one group: the target row first, then one row
+    per covariate; `batch_size` counts windows.
+    """
+    from chronos.chronos2.dataset import Chronos2Dataset, DatasetMode
+
+    rows = 1 + len(inputs[0]["past_covariates"])
+    dataset = Chronos2Dataset(inputs=inputs, context_length=context, prediction_length=horizon,
+                              batch_size=batch_size * rows, output_patch_size=pipeline.model_output_patch_size,
+                              mode=DatasetMode.VALIDATION)
+    for batch in dataset:
+        group_ids = batch["group_ids"]
+        first_row = torch.ones_like(group_ids, dtype=torch.bool)
+        first_row[1:] = group_ids[1:] != group_ids[:-1]
+        yield batch, first_row
+
+
 @torch.inference_mode()
-def evaluate(pipeline: Chronos2Pipeline, windows: torch.Tensor, context: int, batch_size: int) -> dict:
+def evaluate(pipeline: Chronos2Pipeline, windows: torch.Tensor | list[dict], context: int, batch_size: int) -> dict:
+    """Validation loss, RMSE and Winkler80 of the target. `windows` is a tensor (wind-only) or Chronos input dicts."""
     pipeline.model.eval()
-    levels = list(pipeline.quantiles)
+    levels = [list(pipeline.quantiles).index(q) for q in (0.1, 0.5, 0.9)]
     losses, errors, intervals = [], [], []
-    for batch in windows.split(batch_size):
+    def wind_only(batch):
         out = forward_batch(pipeline, batch, context)
-        actual = batch[:, context:].numpy()
-        q10, q50, q90 = out.quantile_preds[:, [levels.index(q) for q in (0.1, 0.5, 0.9)],
-                                          :actual.shape[1]].cpu().numpy().transpose(1, 0, 2)
-        losses.extend([out.loss.item()] * len(batch))
+        return out.loss, out.quantile_preds, batch[:, context:].numpy()
+
+    def with_covariates(batch, first_row):
+        device = pipeline.model.device
+        out = pipeline.model(**{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()})
+        return out.loss, out.quantile_preds[first_row.to(device)], batch["future_target"][first_row].numpy()
+
+    if isinstance(windows, torch.Tensor):
+        batches = (wind_only(batch) for batch in windows.split(batch_size))
+    else:
+        horizon = len(windows[0]["target"]) - context
+        batches = (with_covariates(*item)
+                   for item in covariate_batches(pipeline, windows, context, horizon, batch_size))
+    for loss, quantile_preds, actual in batches:
+        q10, q50, q90 = quantile_preds[:, levels, :actual.shape[1]].cpu().numpy().transpose(1, 0, 2)
+        losses.extend([loss.item()] * len(actual))
         errors.extend(rmse(y, p) for y, p in zip(actual, q50))
         intervals.extend(winkler(y, lo, hi) for y, lo, hi in zip(actual, q10, q90))
     scores = {"loss": float(np.mean(losses)), "RMSE": float(np.mean(errors)),
@@ -122,17 +154,25 @@ def train_with_peft(pipeline, training, validation, context, horizon, run_dir, a
             self.best_step = int(Path(state.best_model_checkpoint).name.rsplit("-", 1)[-1])
             self.evaluations = [entry for entry in state.log_history if "eval_loss" in entry]
 
-    # Recover the continuous training series from its consecutive overlapping windows.
-    series = torch.cat((training[0, :-1], training[:, -1]))
+    if isinstance(training, torch.Tensor):
+        # Recover the continuous training series from its consecutive overlapping windows.
+        inputs = [torch.cat((training[0, :-1], training[:, -1]))]
+        validation_inputs = list(validation.unbind())
+        fit_batch_size = args.batch_size
+    else:
+        # Covariate dicts: fit() counts the rows of a batch (target + covariates), so with C covariates
+        # args.batch_size windows take batch_size * (1 + C) rows.
+        inputs, validation_inputs = training, validation
+        fit_batch_size = args.batch_size * (1 + len(training[0]["past_covariates"]))
     state = CaptureState()
     period = min(50, args.steps)
     tuned = pipeline.fit(
-        inputs=[series], validation_inputs=list(validation.unbind()),
+        inputs=inputs, validation_inputs=validation_inputs,
         context_length=context, min_past=context, prediction_length=horizon,
         finetune_mode="lora", lora_config=LoraConfig(
             r=args.rank, lora_alpha=2 * args.rank, target_modules=list(TARGET_MODULES),
         ),
-        learning_rate=args.learning_rate, num_steps=args.steps, batch_size=args.batch_size,
+        learning_rate=args.learning_rate, num_steps=args.steps, batch_size=fit_batch_size,
         output_dir=run_dir, callbacks=[state], eval_steps=period, save_steps=period,
         seed=args.seed, optim="adamw_torch", weight_decay=0.0, max_grad_norm=1.0,
         disable_tqdm=True,
@@ -140,13 +180,19 @@ def train_with_peft(pipeline, training, validation, context, horizon, run_dir, a
     if not (run_dir / "finetuned-ckpt" / "adapter_config.json").is_file():
         raise RuntimeError("Chronos did not save a PEFT adapter")
     best = {"step": state.best_step, **evaluate(tuned, validation, context, args.batch_size)}
-    return best, state.evaluations
+    return best, state.evaluations, fit_batch_size
+
+
+def training_covariates(args: argparse.Namespace) -> list[str]:
+    """Weather columns used in training: none, or config.TSFM_COVARIATES['wind'] (the backtest's default inputs)."""
+    return list(config.TSFM_COVARIATES["wind"]) if getattr(args, "covariates", "none") == "config" else []
 
 
 def train(args: argparse.Namespace) -> Path:
     run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "chronos2" / args.run_id
     record = start_training(run_dir, "chronos2", args, BASE_CHECKPOINT, BASE_REVISION,
-                            "finetuned-ckpt" if args.backend == "peft" else "adapter.safetensors")
+                            "finetuned-ckpt" if args.backend == "peft" else "adapter.safetensors",
+                            covariates=training_covariates(args))
     try:
         return _train(args, run_dir, record)
     except BaseException as exc:
@@ -168,13 +214,22 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
     torch.manual_seed(args.seed)
     generator = torch.Generator().manual_seed(args.seed)
 
-    training, validation, origins = load_windows(context, horizon)
+    covariates = training_covariates(args)
+    if covariates and args.backend != "peft":
+        raise ValueError("Training with covariates needs --backend peft")
+    if covariates:
+        training, validation, origins = load_covariate_inputs(context, horizon, covariates)
+        window_count = len(training[0]["target"]) - context - horizon + 1
+    else:
+        training, validation, origins = load_windows(context, horizon)
+        window_count = len(training)
     pipeline = load_base(device)
     if context > pipeline.model_context_length:
         raise ValueError("Training history exceeds the base checkpoint context limit")
     baseline = evaluate(pipeline, validation, context, args.batch_size)
-    print(f"{len(training):,} training windows, {len(validation)} validation origins, "
-          f"{context} context steps, {horizon} forecast steps, {device}", flush=True)
+    print(f"{window_count:,} training windows, {len(validation)} validation origins, "
+          f"{context} context steps, {horizon} forecast steps, covariates {covariates or 'none'}, {device}",
+          flush=True)
     print(f"Zero-shot validation: {baseline}", flush=True)
     metadata = {**record, "base_checkpoint": BASE_CHECKPOINT, "base_revision": BASE_REVISION,
                 "backend": args.backend, "target": "wind_MW", "context_steps": context,
@@ -184,12 +239,15 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
                 "validation_origins": [origin.isoformat() for origin in origins],
                 "rank": args.rank, "alpha": 2 * args.rank, "seed": args.seed,
                 "steps": args.steps, "batch_size": args.batch_size, "learning_rate": args.learning_rate,
-                "device": device, "zero_shot": baseline, "training_window_count": len(training),
+                "device": device, "zero_shot": baseline, "training_window_count": window_count,
+                "covariates": covariates, "context_days": args.context_days,
                 "target_modules": list(TARGET_MODULES), "issue_time_utc": config.BACKTEST_ISSUE_TIME,
                 "latency_steps": 0, "optimizer": "AdamW", "weight_decay": 0.0,
                 "validation_interval_steps": min(50, args.steps) if args.backend == "peft" else 50}
     if args.backend == "peft":
-        best, history = train_with_peft(pipeline, training, validation, context, horizon, run_dir, args)
+        best, history, fit_batch_size = train_with_peft(pipeline, training, validation, context, horizon,
+                                                        run_dir, args)
+        metadata["fit_batch_rows"] = fit_batch_size
     else:
         best, history = train_custom(pipeline, training, validation, context, run_dir, args, generator)
 
@@ -243,7 +301,11 @@ if __name__ == "__main__":
     parser.add_argument("--context-days", type=int, default=3)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="training windows per optimizer step (with covariates each window is 1 + C rows)")
+    parser.add_argument("--covariates", choices=("none", "config"), default="none",
+                        help="config: train with config.TSFM_COVARIATES['wind'] as known future covariates "
+                             "(PEFT backend only)")
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=42)
@@ -254,4 +316,6 @@ if __name__ == "__main__":
         parser.error("steps, batch size, rank and context days must all be positive")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         parser.error("learning rate must be positive and finite")
+    if args.covariates != "none" and args.backend != "peft":
+        parser.error("--covariates config needs --backend peft")
     print(f"Saved and verified {train(args)}", flush=True)
