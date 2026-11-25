@@ -18,6 +18,12 @@ RANK=${6:-8}
 SEED=${7:-42}
 VALIDATION=${VALIDATION:-weeks}
 EVAL_CONTEXT_STEPS=${EVAL_CONTEXT_STEPS:-2880}
+# Early stopping: validate every VALIDATION_INTERVAL steps and stop after PATIENCE validations in a row without
+# a D+1 RMSE decrease of at least MIN_DELTA MW (defaults: stop after 250 steps without a 1 MW gain; PATIENCE=0 = off).
+# The best checkpoint is kept on any improvement.
+VALIDATION_INTERVAL=${VALIDATION_INTERVAL:-50}
+PATIENCE=${PATIENCE:-5}
+MIN_DELTA=${MIN_DELTA:-1}
 
 cd "$SLURM_SUBMIT_DIR"
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -27,7 +33,8 @@ export HF_HUB_OFFLINE=1
 echo "Training $RUN_ID: $CONTEXT_DAYS days, $STEPS steps on $(hostname), started $(date)"
 .venv/bin/python -u -m tuning.train_timestral --run-id "$RUN_ID" --covariates config \
     --validation "$VALIDATION" --context-days "$CONTEXT_DAYS" --steps "$STEPS" \
-    --batch-size "$BATCH_SIZE" --rank "$RANK" --learning-rate "$LEARNING_RATE" --seed "$SEED" --device cpu
+    --batch-size "$BATCH_SIZE" --rank "$RANK" --learning-rate "$LEARNING_RATE" --seed "$SEED" \
+    --validation-interval "$VALIDATION_INTERVAL" --patience "$PATIENCE" --min-delta "$MIN_DELTA" --device cpu
 
 echo "Evaluating $RUN_ID on 2025 with a $EVAL_CONTEXT_STEPS-step context, started $(date)"
 .venv/bin/python -u evaluate_tsfm.py --model timestral_209m --adapter-run-id "$RUN_ID" --covariates config \

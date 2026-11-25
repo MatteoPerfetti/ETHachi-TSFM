@@ -134,7 +134,8 @@ def evaluate(pipeline: Chronos2Pipeline, windows: torch.Tensor | list[dict], con
     def with_covariates(batch, first_row):
         device = pipeline.model.device
         out = pipeline.model(**{k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()})
-        return out.loss, out.quantile_preds[first_row.to(device)], batch["future_target"][first_row].numpy()
+        # index on the CPU: masked/list indexing of device tensors crashes the Intel XPU runtime (torch 2.15+xpu)
+        return out.loss, out.quantile_preds.cpu()[first_row], batch["future_target"][first_row].numpy()
 
     if isinstance(windows, torch.Tensor):
         batches = (wind_only(batch) for batch in windows.split(batch_size))
@@ -143,7 +144,7 @@ def evaluate(pipeline: Chronos2Pipeline, windows: torch.Tensor | list[dict], con
         batches = (with_covariates(*item)
                    for item in covariate_batches(pipeline, windows, context, horizon, batch_size))
     for loss, quantile_preds, actual in batches:
-        q10, q50, q90 = quantile_preds[:, levels, :actual.shape[1]].cpu().numpy().transpose(1, 0, 2)
+        q10, q50, q90 = quantile_preds.cpu()[:, levels, :actual.shape[1]].numpy().transpose(1, 0, 2)
         losses.extend([loss.item()] * len(actual))
         errors.extend(rmse(y, p) for y, p in zip(actual, q50))
         intervals.extend(winkler(y, lo, hi) for y, lo, hi in zip(actual, q10, q90))
@@ -276,9 +277,13 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
     horizon = config.BACKTEST_HORIZON_STEPS
     if config.BACKTEST_LATENCY_STEPS != 0:
         raise ValueError("The current training split assumes zero forecast latency")
-    device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    from src.models_tsfm import default_device
+
+    device = args.device if args.device != "auto" else default_device()
     if device == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA is unavailable in this PyTorch environment")
+    if device == "xpu" and not (hasattr(torch, "xpu") and torch.xpu.is_available()):
+        raise ValueError("XPU is unavailable in this PyTorch environment (install the torch +xpu build)")
     if device == "cpu":
         torch.set_num_threads(min(8, torch.get_num_threads()))
     torch.manual_seed(args.seed)
@@ -385,7 +390,7 @@ if __name__ == "__main__":
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--backend", choices=("custom", "peft"), default="custom")
     parser.add_argument("--context-days", type=int, default=3)
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "xpu"), default="auto")
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=8,
                         help="training windows per optimizer step (with covariates each window is 1 + C rows)")

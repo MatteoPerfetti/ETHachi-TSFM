@@ -70,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument("--end", default="2026-01-01T00:00:00Z", help="Exclusive UTC issue-time boundary")
     parser.add_argument("--context-steps", type=int, default=288)
     parser.add_argument("--horizon-steps", type=int, default=156)
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--device", choices=("cpu", "cuda", "xpu"), default="cpu")
     parser.add_argument("--covariates", choices=("none", "config"), default="none",
                         help="config: pass config.TSFM_COVARIATES['wind'] to the models (needed for covariate adapters)")
     parser.add_argument("--delta-run-id", help="also evaluate this delta-Y output adapter (tuning/train_delta_y.py)")
