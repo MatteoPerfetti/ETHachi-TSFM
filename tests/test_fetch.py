@@ -1,7 +1,6 @@
 """Live tests of the Elia and Open-Meteo fetch functions on a one day interval from config.DATA_START.
 
-They call the real APIs with the sources, regions, variables and coordinates from config.py, so they need
-network access. The cache is redirected to a temporary directory, nothing is written to data/.
+They call the real APIs with the sources, regions and variables from config.py, so they need network access. The cache is redirected to a temporary directory, nothing is written to data/.
 """
 import numpy as np
 import pandas as pd
@@ -9,9 +8,8 @@ import pytest
 
 import config
 from src import datasource
-from src.datasource import (fetch_elia, fetch_elia_production, fetch_openmeteo, fetch_openmeteo_region,
-                            load_elia, load_openmeteo, load_previous_runs_openmeteo_region,
-                            previous_runs_openmeteo_fetch, reduce_openmeteo_region)
+from src.datasource import (fetch_elia, fetch_elia_production, fetch_openmeteo_region, load_elia,
+                            load_previous_runs_openmeteo_region, reduce_openmeteo_region)
 from src.http_client import HttpClient, HttpError
 
 
@@ -29,7 +27,7 @@ def elia_source(request) -> tuple[str, dict]:
 
 @pytest.fixture(scope="module")
 def openmeteo_source() -> dict:
-    return config.OPENMETEO_SOURCES["weather"]
+    return config.OPENMETEO_SOURCES
 
 
 @pytest.fixture(scope="module")
@@ -127,52 +125,10 @@ def test_elia_rejects_unknown_region(interval):
 # ==========================================
 # ------------- Open-Meteo -------------
 
-def test_fetch_openmeteo_returns_hourly_columns_per_variable(openmeteo_source, variables, interval):
-    start, end = interval
-    with HttpClient(openmeteo_source["base_url"]) as client:
-        df = fetch_openmeteo(client, openmeteo_source["latitude"], openmeteo_source["longitude"], variables,
-                             start, end)
-
-    assert list(df.columns) == variables
-    # end_date is inclusive and Open-Meteo works on whole days: start day and end day, 24 h each
-    assert len(df) == 48
-    assert_utc_index(df.index, start, pd.Timestamp(end).normalize() + pd.Timedelta("1D"))
-    assert (df.index.to_series().diff().dropna() == pd.Timedelta("1h")).all()
-    assert df.notna().any().all(), "every variable needs at least one value"
-
-
-def test_fetch_openmeteo_values_are_physical(openmeteo_source, variables, interval):
-    start, end = interval
-    with HttpClient(openmeteo_source["base_url"]) as client:
-        df = fetch_openmeteo(client, openmeteo_source["latitude"], openmeteo_source["longitude"], variables,
-                             start, end)
-
-    for column in [c for c in df.columns if c.startswith("cloud_cover")]:
-        assert df[column].between(0, 100).all(), column
-    for column in [c for c in df.columns if "radiation" in c or "irradiance" in c]:
-        assert (df[column] >= 0).all(), column
-    for column in [c for c in df.columns if c.startswith("wind_direction")]:
-        assert df[column].between(0, 360).all(), column
-    for column in [c for c in df.columns if c.startswith("wind_speed")]:
-        assert (df[column] >= 0).all(), column
-
-
-def test_load_openmeteo_caches_and_reads_back(openmeteo_source, variables, interval, cache_in_tmp, no_requests):
-    start, end = interval
-    args = (openmeteo_source["latitude"], openmeteo_source["longitude"], variables, start, end)
-    with HttpClient(openmeteo_source["base_url"]) as client:
-        fetched = load_openmeteo("weather", client, *args)
-
-    assert list(cache_in_tmp.rglob("*.parquet")), "load_openmeteo must write the cache"
-    cached = load_openmeteo("weather", no_requests, *args)
-    pd.testing.assert_frame_equal(cached, fetched, check_freq=False)
-
-
 @pytest.fixture(scope="module")
-def region_points(openmeteo_source) -> pd.DataFrame:
-    """Two points: the configured coordinate and one shifted by 0.5 degrees."""
-    lat, lon = openmeteo_source["latitude"], openmeteo_source["longitude"]
-    return pd.DataFrame({"latitude": [lat, lat + 0.5], "longitude": [lon, lon + 0.5]})
+def region_points() -> pd.DataFrame:
+    """Two points in Belgium, 0.5 degrees apart."""
+    return pd.DataFrame({"latitude": [50.2581, 50.7581], "longitude": [4.9117, 5.4117]})
 
 
 @pytest.fixture(scope="module")
@@ -226,34 +182,7 @@ def previous_runs_interval() -> tuple[str, str]:
 
 
 def previous_runs_columns(variables: list[str]) -> list[str]:
-    return [f"{v}{s}" for v in variables for s in config.OPENMETEO_SOURCES["weather"]["previous_runs"]["suffixes"]]
-
-
-def test_previous_runs_fetch_returns_one_column_per_variable_and_run(openmeteo_source, variables,
-                                                                    previous_runs_interval):
-    start, end = previous_runs_interval
-    with HttpClient(config.OPENMETEO_SOURCES["weather"]["previous_runs"]["base_url"]) as client:
-        df = previous_runs_openmeteo_fetch(client, openmeteo_source["latitude"], openmeteo_source["longitude"],
-                                           variables, start, end)
-
-    assert list(df.columns) == previous_runs_columns(variables)
-    assert len(df) == 48
-    assert_utc_index(df.index, start, pd.Timestamp(end).normalize() + pd.Timedelta("1D"))
-    # The API returns no previous_day1/2 values for the cloud cover levels (observed 2025-01-01), so only the most
-    # recent run is required to be filled for every variable. The wind variables need all three runs.
-    assert df[variables].notna().any().all(), "every variable needs at least one value in the most recent run"
-    wind = previous_runs_columns(openmeteo_source["hourly_wind"])
-    assert df[wind].notna().any().all(), "every wind variable needs at least one value in every run"
-
-
-def test_previous_runs_differ_from_the_most_recent_run(openmeteo_source, previous_runs_interval):
-    start, end = previous_runs_interval
-    with HttpClient(config.OPENMETEO_SOURCES["weather"]["previous_runs"]["base_url"]) as client:
-        df = previous_runs_openmeteo_fetch(client, openmeteo_source["latitude"], openmeteo_source["longitude"],
-                                           ["wind_speed_80m"], start, end)
-
-    assert not df["wind_speed_80m"].equals(df["wind_speed_80m_previous_day1"])
-    assert not df["wind_speed_80m_previous_day1"].equals(df["wind_speed_80m_previous_day2"])
+    return [f"{v}{s}" for v in variables for s in config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]]
 
 
 def test_load_previous_runs_openmeteo_region_caches_and_reads_back(openmeteo_source, region_points,
@@ -261,7 +190,7 @@ def test_load_previous_runs_openmeteo_region_caches_and_reads_back(openmeteo_sou
     start, end = previous_runs_interval
     wind = openmeteo_source["hourly_wind"][4:6]
     args = (region_points, wind, start, end, tmp_path)
-    with HttpClient(config.OPENMETEO_SOURCES["weather"]["previous_runs"]["base_url"], timeout=120) as client:
+    with HttpClient(openmeteo_source["previous_runs"]["base_url"], timeout=120) as client:
         fetched = load_previous_runs_openmeteo_region("previous_runs", client, *args)
 
     assert list(fetched.columns) == ["timestamp", "point", *previous_runs_columns(wind)]
@@ -295,6 +224,27 @@ def test_load_previous_runs_openmeteo_region_chunks_by_call_weight(openmeteo_sou
     monkeypatch.setitem(config.OPENMETEO_SETTINGS, "max_calls_per_request", 0.001)   # below one point: still one point
     load_previous_runs_openmeteo_region("previous_runs", None, region_points, wind, start, end, tmp_path)
     assert seen["chunk_size"] == 1
+
+
+def test_previous_runs_statistics_put_the_run_suffix_at_the_end(tmp_path, monkeypatch):
+    """No network: <variable>_<stat> is the most recent run, <variable>_<stat><suffix> the previous runs."""
+    suffixes = config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]
+    variables = ["wind_speed_80m"]
+    index = pd.date_range("2025-01-01", periods=3, freq="h", tz="UTC")
+    raw = pd.concat([pd.DataFrame({"timestamp": index, "point": point,
+                                   **{f"{variables[0]}{suffix}": np.float32(point + number)
+                                      for number, suffix in enumerate(suffixes)}}) for point in (0, 1)],
+                    ignore_index=True)
+    monkeypatch.setattr(datasource, "load_previous_runs_openmeteo_region", lambda *args, **kwargs: raw)
+    points = pd.DataFrame({"latitude": [50.0, 50.0, 51.0], "longitude": [4.0, 4.0, 5.0]})  # point 0 drawn twice
+
+    stats = datasource.load_previous_runs_weather_statistics("previous_runs", None, points, variables,
+                                                             "2025-01-01T00:00:00Z", "2025-01-01T23:00:00Z", tmp_path)
+
+    assert set(stats.columns) == {f"wind_speed_80m_{stat}{suffix}" for suffix in suffixes
+                                  for stat in config.STATISTICAL_PROPERTIES}
+    # day 1 values are 1 (point 0) and 2 (point 1); point 0 weighs twice: mean (1 + 1 + 2) / 3
+    assert stats["wind_speed_80m_mean_previous_day1"].iloc[0] == pytest.approx(4 / 3)
 
 
 def test_reduce_openmeteo_region_gives_statistics_per_timestep(region_data, variables):
