@@ -26,19 +26,49 @@ class Dataset:
 
 @dataclass(frozen=True)
 class RollingHorizon:
-    """The forecast window of one daily issue time: `steps` timestamps from the issue time on.
+    """The window of one daily issue time: `steps` forecast timestamps from the issue time on, and the target
+    context that ends `latency_steps` before it.
 
-    Owns which weather run each row may read, so the models only ask for plain covariate names. A row reads the
+    Single place for these timing rules, so the backtest and the training rows cannot disagree. It also owns which
+    weather run each row may read, so the models only ask for plain covariate names. A row reads the
     previous day 1 run up to config.OPENMETEO_SOURCES["previous_runs"]["day1_max_lead_hours"] after the issue time
     and the previous day 2 run after that.
     """
     issue_time: pd.Timestamp
     steps: int = config.BACKTEST_HORIZON_STEPS
     step: pd.Timedelta = pd.Timedelta(config.RESOLUTIONCODE)
+    latency_steps: int = config.BACKTEST_LATENCY_STEPS
+
+    @classmethod
+    def daily(cls, start: str | pd.Timestamp, end: str | pd.Timestamp, issue_time: str, steps: int,
+              latency_steps: int) -> list["RollingHorizon"]:
+        """One horizon per day, issued at `issue_time` ("HH:MM", UTC), with the issue time in [start, end)."""
+        start, end = pd.Timestamp(start), pd.Timestamp(end)
+        days = pd.date_range(start.normalize(), end.normalize(), freq="D")
+        issues = days + pd.Timedelta(f"{issue_time}:00")
+        return [cls(issue, steps, latency_steps=latency_steps) for issue in issues[(issues >= start) & (issues < end)]]
+
+    @property
+    def context_end(self) -> pd.Timestamp:
+        """Last target timestamp the models may read."""
+        return self.issue_time - (self.latency_steps + 1) * self.step
+
+    def context_start(self, context_steps: int) -> pd.Timestamp:
+        """First timestamp of a context of `context_steps` steps ending at context_end."""
+        return self.context_end - (context_steps - 1) * self.step
 
     @property
     def valid_times(self) -> pd.DatetimeIndex:
         return pd.date_range(self.issue_time, periods=self.steps, freq=self.step, name="timestamp")
+
+    @property
+    def last_valid_time(self) -> pd.Timestamp:
+        return self.issue_time + (self.steps - 1) * self.step
+
+    @property
+    def future_times(self) -> pd.DatetimeIndex:
+        """Every step after the context: the latency gap and the forecast timestamps."""
+        return pd.date_range(self.context_end + self.step, self.last_valid_time, freq=self.step)
 
     @property
     def lead_steps(self) -> np.ndarray:
@@ -129,63 +159,6 @@ def load_dataset(target_source: str = config.TARGET_SOURCE) -> Dataset:
     return Dataset(target=target, weather=weather)
 
 
-def _forecast_origins(
-    index: pd.DatetimeIndex,
-    start: str | pd.Timestamp,
-    end: str | pd.Timestamp,
-    prediction_length: int,
-    forecast_time: str,
-    timezone: str,
-    frequency: str | pd.Timedelta,
-) -> pd.DatetimeIndex:
-    """Return daily local-time origins whose complete horizon is in the period."""
-    step = pd.Timedelta(frequency)
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    start_ts = start_ts.tz_localize("UTC") if start_ts.tzinfo is None else start_ts
-    end_ts = end_ts.tz_localize("UTC") if end_ts.tzinfo is None else end_ts
-    start_ts = (
-        start_ts.tz_convert(index.tz)
-        if index.tz is not None
-        else start_ts.tz_convert(None)
-    )
-    end_ts = (
-        end_ts.tz_convert(index.tz)
-        if index.tz is not None
-        else end_ts.tz_convert(None)
-    )
-
-    local_start = (
-        start_ts.tz_localize("UTC").tz_convert(timezone)
-        if index.tz is None
-        else start_ts.tz_convert(timezone)
-    )
-    local_end = (
-        end_ts.tz_localize("UTC").tz_convert(timezone)
-        if index.tz is None
-        else end_ts.tz_convert(timezone)
-    )
-    hour, minute = map(int, forecast_time.split(":"))
-    local_days = pd.date_range(
-        local_start.tz_localize(None).normalize(),
-        (local_end - step).tz_localize(None).normalize(),
-        freq="1D",
-    )
-    local_origins = (
-        local_days + pd.Timedelta(hours=hour, minutes=minute)
-    ).tz_localize(timezone)
-    origins = (
-        local_origins.tz_convert(index.tz)
-        if index.tz is not None
-        else local_origins.tz_convert("UTC").tz_localize(None)
-    )
-    last_target_offset = step * (prediction_length - 1)
-    return origins[
-        (origins >= start_ts)
-        & (origins + last_target_offset < end_ts)
-    ]
-
-
 def build_origin_aligned_dataset(
     target: pd.Series | pd.DataFrame,
     covariates: pd.DataFrame,
@@ -194,51 +167,40 @@ def build_origin_aligned_dataset(
     context_length: int,
     prediction_length: int,
     forecast_time: str,
-    timezone: str,
-    frequency: str | pd.Timedelta = "15min",
     latency_steps: int = 0,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Build one pooled tabular row per forecast origin and lead step.
 
-    Every horizon row receives the same target context ending
-    ``latency_steps`` before its forecast origin. Target-time covariates and
-    ``lead_step`` vary across the horizon. The resulting index is
+    The origins are the daily RollingHorizons (issued at ``forecast_time`` UTC) whose complete horizon lies in
+    [start, end). Every horizon row receives the same target context ending ``latency_steps`` before its forecast
+    origin. Target-time covariates and ``lead_step`` vary across the horizon. The resulting index is
     ``(forecast_origin, target_time)``.
     """
     target_series = (target.iloc[:, 0] if isinstance(target, pd.DataFrame) else target).astype(float).sort_index()
     covariates = covariates.sort_index()
-    step = pd.Timedelta(frequency)
-    origins = _forecast_origins(
-        target_series.index,
-        start,
-        end,
-        prediction_length,
-        forecast_time,
-        timezone,
-        step,
-    )
+    start, end = (t.tz_localize("UTC") if t.tzinfo is None else t for t in (pd.Timestamp(start), pd.Timestamp(end)))
+    horizons = [h for h in RollingHorizon.daily(start, end, forecast_time, prediction_length, latency_steps)
+                if h.last_valid_time < end]
+    if not horizons:
+        raise ValueError(f"no forecast origin with a complete horizon of {prediction_length} steps in {start}..{end}")
+    step = horizons[0].step
+
     context_columns = [
         f"{target_series.name}_lag_{lag}"
         for lag in range(1, context_length + 1)
     ]
-    origin_index = origins.repeat(prediction_length)
-    lead_steps = np.tile(
-        np.arange(1, prediction_length + 1),
-        len(origins),
-    )
-    target_offsets = pd.to_timedelta(
-        (lead_steps - 1) * step.value,
-        unit="ns",
-    )
-    target_index = origin_index + target_offsets
+    origin_index = pd.DatetimeIndex([h.issue_time for h in horizons]).repeat(prediction_length)
+    target_index = horizons[0].valid_times.append([h.valid_times for h in horizons[1:]])
+    lead_steps = np.concatenate([h.lead_steps for h in horizons])
     pooled_index = pd.MultiIndex.from_arrays(
         [origin_index, target_index],
         names=["forecast_origin", "target_time"],
     )
 
+    context_ends = pd.DatetimeIndex([h.context_end for h in horizons])
     context_by_origin = np.column_stack([
         target_series.reindex(
-            origins - (latency_steps + lag) * step
+            context_ends - (lag - 1) * step
         ).to_numpy()
         for lag in range(1, context_length + 1)
     ])

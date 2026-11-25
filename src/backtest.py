@@ -18,7 +18,7 @@ import pandas as pd
 import config
 from logger import logger
 from src.baselines import Persistence
-from src.dataset import Dataset
+from src.dataset import Dataset, RollingHorizon
 from src.ensembles import DEFAULT_PARAMETERS as ENSEMBLE_PARAMETERS
 from src.ensembles import build_ensemble
 from src.forecast import STEP, Forecaster, ForecastRequest
@@ -136,14 +136,6 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
     raise ValueError(f"Model '{model_key}' is not available in the backtest yet")
 
 
-def issue_times(settings: BacktestSettings) -> pd.DatetimeIndex:
-    """One issue time per day at settings.issue_time UTC, within [test_start, test_end)."""
-    start, end = pd.Timestamp(settings.test_start), pd.Timestamp(settings.test_end)
-    days = pd.date_range(start.normalize(), end.normalize(), freq="D")
-    issues = days + pd.Timedelta(f"{settings.issue_time}:00")
-    return issues[(issues >= start) & (issues < end)]
-
-
 def context_steps_for(forecaster: Forecaster, settings: BacktestSettings) -> int:
     """Configured context, raised to the model's min_context; warns if the model will cut it."""
     steps = max(settings.context_steps, forecaster.min_context)
@@ -159,22 +151,15 @@ def _complete(data: pd.Series | pd.DataFrame, start: pd.Timestamp, end: pd.Times
     return len(window) == int((end - start) / STEP) + 1 and not window.isna().to_numpy().any()
 
 
-def _context_end(issue: pd.Timestamp, settings: BacktestSettings) -> pd.Timestamp:
-    return issue - (settings.latency_steps + 1) * STEP
-
-
-def build_request(dataset: Dataset, issue: pd.Timestamp, context_steps: int, settings: BacktestSettings,
+def build_request(dataset: Dataset, horizon: RollingHorizon, context_steps: int,
                   covariates: list[str] | None) -> ForecastRequest:
-    """Request for one issue time: `context_steps` of target ending latency_steps before the issue time."""
-    context_end = _context_end(issue, settings)
-    context = dataset.target.loc[context_end - (context_steps - 1) * STEP:context_end]
-    forecast_index = pd.date_range(issue, periods=settings.horizon_steps, freq=STEP, name="timestamp")
+    """Request for one horizon: `context_steps` of target ending latency_steps before the issue time."""
+    context = dataset.target.loc[horizon.context_start(context_steps):horizon.context_end]
     if not covariates:
-        return ForecastRequest(issue, forecast_index, context)
-    future_index = pd.date_range(context_end + STEP, forecast_index[-1], freq=STEP)
-    return ForecastRequest(issue, forecast_index, context,
+        return ForecastRequest(horizon.issue_time, horizon.valid_times, context)
+    return ForecastRequest(horizon.issue_time, horizon.valid_times, context,
                            past_covariates=dataset.weather.loc[context.index, covariates],
-                           future_covariates=dataset.weather.loc[future_index, covariates])
+                           future_covariates=dataset.weather.loc[horizon.future_times, covariates])
 
 
 def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSettings | None = None) -> BacktestResult:
@@ -215,21 +200,20 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
 
     # Same issue times for every model: skip a day if any model would get incomplete data
     valid, skipped = [], []
-    for issue in issue_times(settings):
-        context_end = _context_end(issue, settings)
-        last = issue + (settings.horizon_steps - 1) * STEP
-        ok = _complete(dataset.target, context_end - (max(context_steps.values()) - 1) * STEP, last)
+    for horizon in RollingHorizon.daily(settings.test_start, settings.test_end, settings.issue_time,
+                                        settings.horizon_steps, settings.latency_steps):
+        ok = _complete(dataset.target, horizon.context_start(max(context_steps.values())), horizon.last_valid_time)
         if ok and covariate_contexts:
             ok = _complete(dataset.weather[settings.covariates],
-                           context_end - (max(covariate_contexts) - 1) * STEP, last)
-        (valid if ok else skipped).append(issue)
+                           horizon.context_start(max(covariate_contexts)), horizon.last_valid_time)
+        (valid if ok else skipped).append(horizon)
     if skipped:
         logger.warning("Skipped %d issue times with incomplete data: %s",
-                       len(skipped), [t.strftime("%Y-%m-%d") for t in skipped])
+                       len(skipped), [h.issue_time.strftime("%Y-%m-%d") for h in skipped])
     if not valid:
         raise ValueError("no issue time with complete data in the test period")
     logger.info("Backtest %s: %d issue times %s..%s, models %s", settings.run_name, len(valid),
-                valid[0], valid[-1], [f.name for f in forecasters])
+                valid[0].issue_time, valid[-1].issue_time, [f.name for f in forecasters])
 
     train = slice(pd.Timestamp(settings.train_start), pd.Timestamp(settings.train_end) - STEP)
     tables, all_timings = [], {}
@@ -239,8 +223,8 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
         forecaster.fit(dataset.target.loc[train], dataset.weather.loc[train, covariates] if covariates else None)
         fit_seconds = time.perf_counter() - start
 
-        requests = [build_request(dataset, issue, context_steps[forecaster.name], settings, covariates)
-                    for issue in valid]
+        requests = [build_request(dataset, horizon, context_steps[forecaster.name], covariates)
+                    for horizon in valid]
         start = time.perf_counter()
         results = forecaster.predict(requests)
         all_timings[forecaster.name] = {
@@ -299,7 +283,7 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
     return BacktestResult(
         settings=settings,
         predictions=predictions,
-        skipped=skipped,
+        skipped=[horizon.issue_time for horizon in skipped],
         timings=timings,
         model_configs=model_configs,
         dataset_fingerprint=hashlib.sha256(
