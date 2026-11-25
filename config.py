@@ -203,7 +203,7 @@ ELIA_SOURCES = {
 # Open-Meteo counts a request as locations x variables / 10 x days / 14 calls (limits: 600/min, 5000/h, 10000/day).
 # The previous runs request is split into chunks of points that stay below max_calls_per_request calls each.
 OPENMETEO_SETTINGS = {
-    "max_calls_per_request": 1000,
+    "max_calls_per_request": 250,
     "daily_call_limit": 10000,
 }
 

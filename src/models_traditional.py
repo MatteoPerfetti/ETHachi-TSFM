@@ -97,8 +97,6 @@ class TraditionalMLAdapter(Forecaster):
                 context_length=self.context_steps,
                 prediction_length=self.horizon_steps,
                 forecast_time=self.issue_time,
-                timezone="UTC",
-                frequency=STEP,
                 latency_steps=self.latency_steps,
             )
         else:
