@@ -10,8 +10,7 @@ from shapely import contains_xy
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
-from config import (DATA_DIR, DATA_END, DATA_START, INPUTS_DIR, RESOLUTIONCODE, STATISTICAL_PROPERTIES, ELIA_SOURCES,
-                    OPENMETEO_SOURCES, OPENMETEO_SETTINGS, TARGET_SOURCE)
+import config
 from logger import logger
 from src.http_client import HttpClient, HttpError
 
@@ -21,12 +20,12 @@ RegionSampler = Callable[[str, int, np.random.Generator], np.ndarray]
 
 def to_wide(df: pd.DataFrame, index: str, columns: str, values: str) -> pd.DataFrame:
     """Pivot long to wide, summing rows that share the same index and column (e.g. several units per region)."""
-    # min_count=1 keeps NaN where all summed values are missing, instead of turning it into 0
+    # min_count=1 keeps NaN where all summed values are missing
     return df.groupby([index, columns])[values].sum(min_count=1).unstack(columns)
 
 
 def cache_path(name: str, start: str, end: str, resolutioncode: str) -> Path:
-    return DATA_DIR / name / f"{resolutioncode}_{pd.Timestamp(start):%Y%m%d}_{pd.Timestamp(end):%Y%m%dT}.parquet"
+    return config.DATA_DIR / name / f"{resolutioncode}_{pd.Timestamp(start):%Y%m%d}_{pd.Timestamp(end):%Y%m%dT}.parquet"
 
 
 def cached(name: str, path: Path, compute: Callable, read: Callable = pd.read_parquet,
@@ -103,7 +102,7 @@ def load_region_probabilities(name: str, client: HttpClient, regions: list[str],
     """Return the sampling probability of each region: its share of the production of all `regions` in `year`.
 
     Uses the cached csv in `directory` if it holds all regions, else fetches the yearly production from the Elia
-    dataset client is bound to and caches it. The probabilities are renormalized over `regions`, so they sum to 1.
+    dataset client is bound to and caches it. The probabilities are renormalized over `regions` and sum to 1.
     """
     def compute() -> pd.DataFrame:
         start, end = f"{year}-01-01T00:00:00Z", f"{year + 1}-01-01T00:00:00Z"
@@ -155,12 +154,11 @@ def fetch_openmeteo_region(client: HttpClient, points: pd.DataFrame, variables: 
     """Query the Open-Meteo API for every point (latitude, longitude) and return hourly data in long format:
     columns timestamp (tz-aware UTC), point (row position in points) and one float32 column per variable.
 
-    Several points are sent per request (chunk_size) to keep the responses small. Open-Meteo rejects requests
-    above a per-minute limit (about 4 requests of 10 points over 2 years were accepted per minute), so we
-    sleep sleep_seconds between requests. The hourly limit (5000 calls, one request counts locations x
-    variables / 10 x days / 14, about 315 for a chunk of 10 points, 6 variables and 2 years) is waited out
-    if hit. If chunk_dir is given, every chunk is saved there and chunks already present are not requested
-    again, so an interrupted run continues where it stopped. start and end as in openmeteo_params.
+    Several points are sent per request (chunk_size). Requests are spaced sleep_seconds apart (Open-Meteo
+    accepted about 4 requests of 10 points over 2 years per minute). The hourly limit (5000 calls, one request
+    counts locations x variables / 10 x days / 14, about 315 for a chunk of 10 points, 6 variables and 2 years)
+    is waited out if hit. If chunk_dir is given, every chunk is saved there and chunks already present are not
+    requested again. start and end as in openmeteo_params.
     """
     frames, requested = [], False
     for first in range(0, len(points), chunk_size):
@@ -211,18 +209,18 @@ def load_previous_runs_openmeteo_region(name: str, client: HttpClient, points: p
     """Like load_openmeteo_region, but from the Previous Runs API (client bound to the previous_runs base_url):
     every variable once per run (<variable>, <variable>_previous_day1, <variable>_previous_day2).
 
-    The call weight grows with the number of variables (three times as many as the plain request) and the days, so
-    the points are sent in chunks of at most OPENMETEO_SETTINGS["max_calls_per_request"] calls each. The minutely
-    and hourly limits are waited out (see get_json_waiting_for_limits). The daily limit is raised as an error, but
-    the chunks already fetched stay on disk, so running again the next day continues where it stopped.
+    The points are sent in chunks of at most config.OPENMETEO_SETTINGS["max_calls_per_request"] calls each (the call
+    weight grows with the number of variables, three times as many as the plain request, and the days). The minutely
+    and hourly limits are waited out (see get_json_waiting_for_limits). The daily limit is raised as an error; the
+    chunks already fetched stay on disk and a later run continues where it stopped.
     """
-    suffixes = OPENMETEO_SOURCES["previous_runs"]["suffixes"]
-    names = [f"{variable}{suffix}" for variable in variables for suffix in suffixes]
+    suffixes = config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]
+    names =[f"{variable}{suffix}" for variable in variables for suffix in suffixes]
     days = (pd.Timestamp(end[:10]) - pd.Timestamp(start[:10])).days + 1
     calls_per_point = len(names) / 10 * days / 14
-    chunk_size = max(1, int(OPENMETEO_SETTINGS["max_calls_per_request"] / calls_per_point))
+    chunk_size = max(1, int(config.OPENMETEO_SETTINGS["max_calls_per_request"] / calls_per_point))
     total_calls = calls_per_point * len(points)
-    daily_call_limit = OPENMETEO_SETTINGS["daily_call_limit"]
+    daily_call_limit = config.OPENMETEO_SETTINGS["daily_call_limit"]
     logger.info("%s: %d points x %d variables x %d days = about %.0f calls in chunks of %d points",
                 name, len(points), len(names), days, total_calls, chunk_size)
     if total_calls > daily_call_limit:
@@ -234,9 +232,9 @@ def load_previous_runs_openmeteo_region(name: str, client: HttpClient, points: p
 def reduce_openmeteo_region(df: pd.DataFrame, variables: list[str]) -> pd.DataFrame:
     """Summarize all points per timestep: tz-aware UTC DatetimeIndex, one column per variable and statistic,
     e.g. direct_radiation_mean."""
-    stats = df.groupby("timestamp")[variables].agg(STATISTICAL_PROPERTIES)
+    stats = df.groupby("timestamp")[variables].agg(config.STATISTICAL_PROPERTIES)
     stats.columns = [f"{variable}_{stat}" for variable, stat in stats.columns]
-    # skew and kurt are undefined when all points agree (std = 0, e.g. no radiation at night): no asymmetry, no tails
+    # skew and kurt are undefined when all points agree (std = 0, e.g. no radiation at night): set to 0
     shape_columns = [c for c in stats.columns if c.endswith(("_skew", "_kurt"))]
     stats[shape_columns] = stats[shape_columns].fillna(0)
     return stats
@@ -262,7 +260,7 @@ def load_weather_statistics(name: str, client: HttpClient, points: pd.DataFrame,
     them from the raw point data (see load_openmeteo_region) and cache them.
 
     A location drawn several times (e.g. a wind farm) is fetched once; its rows are repeated once per draw before
-    the reduction, so it weighs in the statistics as often as it was drawn.
+    the reduction.
     """
     def compute() -> pd.DataFrame:
         unique, draws = unique_locations(points)
@@ -277,10 +275,10 @@ def load_previous_runs_weather_statistics(name: str, client: HttpClient, points:
     """Like load_weather_statistics, from the Previous Runs API (see load_previous_runs_openmeteo_region).
 
     The run suffix goes at the end of the column name: <variable>_<stat> is the most recent run, then
-    <variable>_<stat>_previous_day1 and <variable>_<stat>_previous_day2. This keeps the plain covariate names
-    (e.g. wind_speed_80m_mean) and lets encode_directions give wind_sin_120m_mean_previous_day1.
+    <variable>_<stat>_previous_day1 and <variable>_<stat>_previous_day2, e.g. wind_speed_80m_mean and
+    wind_sin_120m_mean_previous_day1 (after encode_directions).
     """
-    suffixes = OPENMETEO_SOURCES["previous_runs"]["suffixes"]
+    suffixes = config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]
 
     def compute() -> pd.DataFrame:
         unique, draws = unique_locations(points)
@@ -288,23 +286,23 @@ def load_previous_runs_weather_statistics(name: str, client: HttpClient, points:
         stats = reduce_weighted(raw, draws, [f"{variable}{suffix}" for variable in variables for suffix in suffixes])
         return stats.rename(columns={f"{variable}{suffix}_{stat}": f"{variable}_{stat}{suffix}"
                                      for variable in variables for suffix in suffixes
-                                     for stat in STATISTICAL_PROPERTIES})
+                                     for stat in config.STATISTICAL_PROPERTIES})
 
     return cached(f"{name} statistics", directory / f"{name}_{cache_path(name, start, end, 'PT1H').name}", compute)
 
 
 def hourly_variables(target_source: str) -> list[str]:
     """Open-Meteo variables requested for target_source."""
-    return OPENMETEO_SOURCES["hourly_pv"] if target_source == "solar" else OPENMETEO_SOURCES["hourly_wind"]
+    return config.OPENMETEO_SOURCES["hourly_pv"] if target_source == "solar" else config.OPENMETEO_SOURCES["hourly_wind"]
 
 
-def load_previous_runs_weather(target_source: str = TARGET_SOURCE) -> pd.DataFrame:
+def load_previous_runs_weather(target_source: str = config.TARGET_SOURCE) -> pd.DataFrame:
     """Weather statistics of the most recent run and of the previous day 1 and day 2 runs for target_source over
     DATA_START..DATA_END, from the local parquet cache or via the Previous Runs API."""
-    with HttpClient(OPENMETEO_SOURCES["previous_runs"]["base_url"], timeout=120) as om:
+    with HttpClient(config.OPENMETEO_SOURCES["previous_runs"]["base_url"], timeout=120) as om:
         return load_previous_runs_weather_statistics(
-            "previous_runs", om, weather_points(target_source), hourly_variables(target_source), DATA_START, DATA_END,
-            OPENMETEO_SOURCES["weather_sampling"][target_source]["cache_dir"])
+            "previous_runs", om, weather_points(target_source), hourly_variables(target_source), config.DATA_START,
+            config.DATA_END, config.OPENMETEO_SOURCES["weather_sampling"][target_source]["cache_dir"])
 
 # ==========================================
 # ------------- Weather sample points -------------
@@ -327,7 +325,7 @@ def load_nuts_geometries(client: HttpClient, nuts_ids: dict[str, str]) -> dict[s
 
     The GeoJSON is cached under data/solar-region, named after its version, projection, scale and level.
     """
-    cache_dir = OPENMETEO_SOURCES["weather_sampling"]["solar"]["cache_dir"]
+    cache_dir = config.OPENMETEO_SOURCES["weather_sampling"]["solar"]["cache_dir"]
     text = cached("NUTS polygons", cache_dir / "_".join(client.base_url.split("/")[-4:]), client.get_text,
                   read=lambda path: path.read_text(encoding="utf-8"),
                   write=lambda text, path: path.write_text(text, encoding="utf-8"))
@@ -346,18 +344,19 @@ def sample_points_in(geometry: BaseGeometry, n: int, rng: np.random.Generator) -
 
 
 def generate_pv_weather_samples(elia_client: HttpClient, nuts_client: HttpClient,
-                                regions: list[str] = ELIA_SOURCES["solar"]["sample_regions"],
-                                n_samples: int = OPENMETEO_SOURCES["weather_sampling"]["solar"]["n_samples"],
-                                seed: int = OPENMETEO_SOURCES["weather_sampling"]["solar"]["seed"]
+                                regions: list[str] = config.ELIA_SOURCES["solar"]["sample_regions"],
+                                n_samples: int = config.OPENMETEO_SOURCES["weather_sampling"]["solar"]["n_samples"],
+                                seed: int = config.OPENMETEO_SOURCES["weather_sampling"]["solar"]["seed"]
                                 ) -> pd.DataFrame:
     """Return n_samples random weather sample points (latitude, longitude, region), spread over the regions
     in proportion to their solar production.
 
     elia_client is bound to the Elia solar dataset, nuts_client to the solar weather_sampling nuts_url.
     """
-    nuts = OPENMETEO_SOURCES["weather_sampling"]["solar"]["nuts"]
-    probabilities = load_region_probabilities("solar", elia_client, regions, ELIA_SOURCES["solar"]["production_year"],
-                                              RESOLUTIONCODE, INPUTS_DIR)
+    nuts = config.OPENMETEO_SOURCES["weather_sampling"]["solar"]["nuts"]
+    probabilities = load_region_probabilities("solar", elia_client, regions,
+                                              config.ELIA_SOURCES["solar"]["production_year"],
+                                              config.RESOLUTIONCODE, config.INPUTS_DIR)
     geometries = load_nuts_geometries(nuts_client, {region: nuts[region] for region in regions})
     return sample_points(probabilities, lambda region, n, rng: sample_points_in(geometries[region], n, rng),
                          n_samples, seed)
@@ -374,34 +373,35 @@ def wind_farm_sampler(farms: pd.DataFrame) -> RegionSampler:
     return sample
 
 
-def generate_wind_weather_samples(elia_client: HttpClient, regions: list[str] = ELIA_SOURCES["wind"]["regions"],
-                                  n_samples: int = OPENMETEO_SOURCES["weather_sampling"]["wind"]["n_samples"],
-                                  seed: int = OPENMETEO_SOURCES["weather_sampling"]["wind"]["seed"]
+def generate_wind_weather_samples(elia_client: HttpClient, regions: list[str] = config.ELIA_SOURCES["wind"]["regions"],
+                                  n_samples: int = config.OPENMETEO_SOURCES["weather_sampling"]["wind"]["n_samples"],
+                                  seed: int = config.OPENMETEO_SOURCES["weather_sampling"]["wind"]["seed"]
                                   ) -> pd.DataFrame:
     """Return n_samples random weather sample points (latitude, longitude, region) at wind farm locations,
     spread over the regions in proportion to their wind production. elia_client is bound to the Elia wind dataset."""
-    probabilities = load_region_probabilities("wind", elia_client, regions, ELIA_SOURCES["wind"]["production_year"],
-                                              RESOLUTIONCODE, INPUTS_DIR)
-    farms = pd.read_csv(OPENMETEO_SOURCES["weather_sampling"]["wind"]["farms_path"], sep=";")
+    probabilities = load_region_probabilities("wind", elia_client, regions,
+                                              config.ELIA_SOURCES["wind"]["production_year"],
+                                              config.RESOLUTIONCODE, config.INPUTS_DIR)
+    farms = pd.read_csv(config.OPENMETEO_SOURCES["weather_sampling"]["wind"]["farms_path"], sep=";")
     return sample_points(probabilities, wind_farm_sampler(farms), n_samples, seed)
 
 
 def weather_points(target_source: str) -> pd.DataFrame:
     """Weather sample points (latitude, longitude, region) of target_source: provinces for solar, farms for wind."""
-    with HttpClient(ELIA_SOURCES[target_source]["base_url"]) as elia:
+    with HttpClient(config.ELIA_SOURCES[target_source]["base_url"]) as elia:
         if target_source == "solar":
-            with HttpClient(OPENMETEO_SOURCES["weather_sampling"]["solar"]["nuts_url"]) as nuts:
+            with HttpClient(config.OPENMETEO_SOURCES["weather_sampling"]["solar"]["nuts_url"]) as nuts:
                 return generate_pv_weather_samples(elia, nuts)
         return generate_wind_weather_samples(elia)
 
 
 if __name__ == "__main__":
     # Fetch and cache the previous runs weather of TARGET_SOURCE: python -m src.datasource
-    # Chunks already fetched stay on disk, so after a rate limit or the daily limit the same command continues.
+    # Chunks already fetched stay on disk; after a rate limit or the daily limit the same command continues.
     weather = load_previous_runs_weather()
-    logger.info("Previous runs weather of %s: %d timestamps, %d columns, %s..%s", TARGET_SOURCE, len(weather),
-                weather.shape[1], weather.index[0], weather.index[-1])
-    run_suffixes = OPENMETEO_SOURCES["previous_runs"]["suffixes"]
+    logger.info("Previous runs weather of %s: %d timestamps, %d columns, %s..%s", config.TARGET_SOURCE,
+                len(weather), weather.shape[1], weather.index[0], weather.index[-1])
+    run_suffixes = config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]
     for suffix in run_suffixes:
         columns = [c for c in weather.columns if c.endswith(suffix)] if suffix else [
             c for c in weather.columns if not c.endswith(run_suffixes[1:])]
