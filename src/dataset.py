@@ -2,8 +2,7 @@
 """Adapter between the data extraction pipeline and the forecasting code.
 
 Only calls the extraction functions (datasource, merge helpers in features), it never changes them.
-Everything downstream (models, backtest, metrics) uses `load_dataset()` and the `Dataset` it returns,
-so a new extraction strategy only needs changes here.
+Everything downstream (models, backtest, metrics) uses `load_dataset()` and the `Dataset` it returns.
 """
 from dataclasses import dataclass
 
@@ -29,8 +28,8 @@ class RollingHorizon:
     """The window of one daily issue time: `steps` forecast timestamps from the issue time on, and the target
     context that ends `latency_steps` before it.
 
-    Single place for these timing rules, so the backtest and the training rows cannot disagree. It also owns which
-    weather run each row may read, so the models only ask for plain covariate names. A row reads the
+    Single place for these timing rules. It also owns which weather run each row may read; models ask for
+    plain covariate names. A row reads the
     previous day 1 run up to config.OPENMETEO_SOURCES["previous_runs"]["day1_max_lead_hours"] after the issue time
     and the previous day 2 run after that.
     """
@@ -116,7 +115,7 @@ def load_targets(targets_data: dict[str, pd.DataFrame], target_source: str = con
     target = targets_data[target_source]
     if config.MULTILE_TARGETS:
         return target.add_prefix(f"{target_source}_").add_suffix("_MW")
-    # min_count=1 keeps NaN where every region is missing, instead of turning it into 0
+    # min_count=1 keeps NaN where every region is missing
     return target.sum(axis=1, min_count=1).to_frame(name=f"{target_source}_MW")
 
 
