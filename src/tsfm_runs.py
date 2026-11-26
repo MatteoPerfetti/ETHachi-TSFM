@@ -136,7 +136,7 @@ def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: s
                   "covariates": list(covariates or []),
                   "pca_components": pca_components if covariates else None}
         if covariates:
-            weather = Path(config.DATA_DWD_PATH)
+            weather = Path(config.OPENMETEO_SOURCES["dwd"]["path"])
             record["dataset"]["weather"] = {"path": str(weather), "sha256": fingerprint(weather)}
         write_record(run_dir / "run.json", record)
         return record
