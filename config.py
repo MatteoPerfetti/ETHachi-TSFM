@@ -251,7 +251,7 @@ OPENMETEO_SOURCES = {
         "day1_max_lead_hours": 15,
     },
     "dwd": {
-        "use": True,
+        "use": False,
         "path": DATA_DIR / "dwd" / "gen_weather_dwd.parquet",
     },
     # Sample points and spatial weather aggregation, per Elia source (regions: see ELIA_SOURCES).

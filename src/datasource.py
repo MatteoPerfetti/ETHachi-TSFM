@@ -195,7 +195,7 @@ def load_openmeteo_region(name: str, client: HttpClient, points: pd.DataFrame, v
                           end: str, directory: Path, chunk_size: int = 10) -> pd.DataFrame:
     """Return the raw point data from the local cache in `directory` if present, else fetch it from the
     Open-Meteo API and cache it."""
-    path = directory / f"{name}_points_{cache_path(name, start, end, 'PT1H').name}"
+    path = directory / f"points_{cache_path(name, start, end, 'PT1H').name}"
     chunk_dir = path.with_name(f"{path.stem}_chunks")
     df = cached(f"{name} for {len(points)} points", path,
                 lambda: fetch_openmeteo_region(client, points, variables, start, end, chunk_size=chunk_size,
@@ -254,27 +254,13 @@ def reduce_weighted(raw: pd.DataFrame, draws: pd.Series, variables: list[str]) -
     return reduce_openmeteo_region(raw.loc[raw.index.repeat(raw["point"].map(draws))], variables)
 
 
-def load_weather_statistics(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str],
-                            start: str, end: str, directory: Path) -> pd.DataFrame:
-    """Return the per-timestep statistics over all sample points from `directory` if present, else compute
-    them from the raw point data (see load_openmeteo_region) and cache them.
-
-    A location drawn several times (e.g. a wind farm) is fetched once; its rows are repeated once per draw before
-    the reduction.
-    """
-    def compute() -> pd.DataFrame:
-        unique, draws = unique_locations(points)
-        raw = load_openmeteo_region(name, client, unique, variables, start, end, directory)
-        return reduce_weighted(raw, draws, variables)
-
-    return cached(f"{name} statistics", directory / f"{name}_{cache_path(name, start, end, 'PT1H').name}", compute)
-
-
 def load_previous_runs_weather_statistics(name: str, client: HttpClient, points: pd.DataFrame, variables: list[str],
                                           start: str, end: str, directory: Path) -> pd.DataFrame:
-    """Like load_weather_statistics, from the Previous Runs API (see load_previous_runs_openmeteo_region).
+    """Return the per-timestep statistics over all sample points from `directory` if present, else compute them
+    from the raw Previous Runs point data (see load_previous_runs_openmeteo_region) and cache them.
 
-    The run suffix goes at the end of the column name: <variable>_<stat> is the most recent run, then
+    A location drawn several times (e.g. a wind farm) is fetched once; its rows are repeated once per draw before
+    the reduction. The run suffix goes at the end of the column name: <variable>_<stat> is the most recent run, then
     <variable>_<stat>_previous_day1 and <variable>_<stat>_previous_day2, e.g. wind_speed_80m_mean and
     wind_sin_120m_mean_previous_day1 (after encode_directions).
     """
@@ -288,7 +274,7 @@ def load_previous_runs_weather_statistics(name: str, client: HttpClient, points:
                                      for variable in variables for suffix in suffixes
                                      for stat in config.STATISTICAL_PROPERTIES})
 
-    return cached(f"{name} statistics", directory / f"{name}_{cache_path(name, start, end, 'PT1H').name}", compute)
+    return cached(f"{name} statistics", directory / cache_path(name, start, end, 'PT1H').name, compute)
 
 
 def hourly_variables(target_source: str) -> list[str]:

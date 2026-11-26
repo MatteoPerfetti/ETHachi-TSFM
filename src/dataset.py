@@ -11,7 +11,7 @@ import pandas as pd
 
 import config
 from logger import logger
-from src.datasource import hourly_variables, load_elia, load_weather_statistics, weather_points
+from src.datasource import load_elia, load_previous_runs_weather
 from src.features import encode_directions, interpolate_to_15min, merge, merge_dwd_weather
 from src.http_client import HttpClient
 
@@ -104,11 +104,7 @@ def load_sources(target_source: str = config.TARGET_SOURCE) -> tuple[dict[str, p
     for name, src in config.ELIA_SOURCES.items():
         with HttpClient(src["base_url"]) as client:
             targets_data[name] = load_elia(name, client, src["regions"], config.DATA_START, config.DATA_END, config.RESOLUTIONCODE)
-    src = config.OPENMETEO_SOURCES
-    with HttpClient(src["base_url"], timeout=120) as om:
-        features_data["weather"] = load_weather_statistics(
-            "weather", om, weather_points(target_source), hourly_variables(target_source), config.DATA_START,
-            config.DATA_END, src["weather_sampling"][target_source]["cache_dir"])
+    features_data["weather"] = load_previous_runs_weather(target_source)
     return features_data, targets_data
 
 

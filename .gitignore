@@ -5,9 +5,9 @@ claude/
 # data/
 data/cache/
 data/features/
-data/solar/
+#data/solar/
 data/target/
-data/wind/
+#data/wind/
 plots/
 results/
 
