@@ -10,6 +10,7 @@ import torch
 import config
 from logger import logger
 from src.forecast import QUANTILE_COLUMNS, Forecaster, ForecastRequest, ForecastResult
+from src.pca import CovariatePCA, fit_covariate_pca
 
 TSFM_BATCH_SIZE = 64  # requests per model call; lower it if the device runs out of memory
 
@@ -39,9 +40,12 @@ class TSFMAdapter(Forecaster):
     uses_covariates = True
 
     def __init__(self, device: str | None = None, batch_size: int = TSFM_BATCH_SIZE,
-                 checkpoint: str | None = None, model: Any = None, name: str | None = None):
+                 checkpoint: str | None = None, model: Any = None, name: str | None = None,
+                 pca_components: int | float | None = None):
         self.device = device or default_device()
         self.batch_size = batch_size
+        self.pca_components = pca_components
+        self.pca: CovariatePCA | None = None
         checkpoint = checkpoint or config.MODELS_REGISTRY[self.model_key]["checkpoint"]
         if name is not None:
             self.name = name
@@ -57,13 +61,16 @@ class TSFMAdapter(Forecaster):
                     self.name, checkpoint, self.device, self.load_seconds, self.max_context)
 
     def fit(self, target: pd.Series, covariates: pd.DataFrame | None = None) -> None:
-        """Zero-shot: nothing to train.
+        """Zero-shot: only the covariate PCA is fitted (on the training period), the weights stay untouched.
 
         TODO fine-tuning: train the pretrained weights here on the history given by the backtest engine
         (target + covariates of the training period), then keep using `predict` unchanged.
         """
+        self.pca = fit_covariate_pca(self.pca_components, covariates)
 
     def predict(self, requests: list[ForecastRequest]) -> list[ForecastResult]:
+        if self.pca is not None:
+            requests = [self.pca.transform_request(request) for request in requests]
         results = []
         for first in range(0, len(requests), self.batch_size):
             batch = requests[first:first + self.batch_size]
@@ -217,8 +224,8 @@ TSFM_ADAPTERS: dict[str, type[TSFMAdapter]] = {
 }
 
 
-def load_tsfm(model_key: str, device: str | None = None) -> TSFMAdapter:
+def load_tsfm(model_key: str, device: str | None = None, pca_components: int | float | None = None) -> TSFMAdapter:
     """Create the adapter of a TSFM registered in config.MODELS_REGISTRY (loads the weights)."""
     if model_key not in TSFM_ADAPTERS:
         raise ValueError(f"No TSFM adapter for '{model_key}', available: {list(TSFM_ADAPTERS)}")
-    return TSFM_ADAPTERS[model_key](device=device)
+    return TSFM_ADAPTERS[model_key](device=device, pca_components=pca_components)
