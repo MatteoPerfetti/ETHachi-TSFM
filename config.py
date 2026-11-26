@@ -106,9 +106,17 @@ DEFAULT_CONTEXT = 1344
 # ==========================================
 BACKTEST_MODELS = ["persistence", "xgboost", "chronos2", "timestral_209m", "timesfm3"]
 BACKTEST_ISSUE_TIME = "09:00"
+BACKTEST_ISSUE_EVERY_DAYS = 1          # 1 = one forecast every day of the test period; N = every N-th day (quick runs)
 BACKTEST_HORIZON_STEPS = 156
-BACKTEST_CONTEXT_STEPS = 3 * 96
+BACKTEST_CONTEXT_DAYS = 3              # target history given to the models, in days
+BACKTEST_CONTEXT_STEPS = BACKTEST_CONTEXT_DAYS * STEPS_PER_DAY
 BACKTEST_LATENCY_STEPS = 0
+
+# Context-length sweep (context_sweep.py): every model below runs once per context length.
+# Persistence is added once as reference (it does not depend on the context).
+CONTEXT_SWEEP_DAYS = [3, 7]            # next: 14, 30, 60
+CONTEXT_SWEEP_MODELS = ["chronos2", "timestral_209m", "timesfm3"]
+CONTEXT_SWEEP_DIR = Path(__file__).resolve().parent / "results" / "context_sweep"
 BACKTEST_RESULTS_DIR = Path(__file__).resolve().parent / "results"
 BACKTEST_EVAL_WINDOW = "all"
 BACKTEST_PLOT_START = "2025-03-01"
