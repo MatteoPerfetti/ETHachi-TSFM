@@ -162,7 +162,7 @@ Each dashboard backtest creates a separate result record. Training remains a sep
 | `TRAIN_START` / `TRAIN_END` | 2024 | training period passed to `fit` (unused by zero-shot models) |
 | `BACKTEST_EVAL_WINDOW` | `"all"` | metrics on all 156 steps, or `"d+1"`: only the next day 00:00–23:45 (as Predico) |
 | `BACKTEST_PLOT_START` / `_END` / `_MODELS` | 1–14 Mar 2025, all | period and models of the forecast plot |
-| `DATA_USE_DWD` | `True` | merge the DWD weather file (needed for the wind covariates) |
+| `OPENMETEO_SOURCES["dwd"]["use"]` | `True` | merge the DWD weather file (needed for the wind covariates) |
 
 `src/validate_config.py` checks these at start-up and lists every invalid setting.
 
@@ -200,6 +200,90 @@ The legacy `main.py` run name reflects settings, e.g. `wind_ctx288_h156_lat0_cov
 | **Traditional-model utilities** | |
 | `src/models.py` | Time-based train/test split and cross-validation, XGBoost regressor. |
 
+### Pipeline flow chart
+
+How the scripts connect, from the raw data download to the TSFM and traditional-model results in Streamlit.
+
+```mermaid
+flowchart TD
+    CFG["config.py<br/>all settings"]
+    VAL["src/validate_config.py<br/>config checks"]
+    CFG -.-> VAL
+
+    subgraph DATA["1 · Data extraction"]
+        ELIA["Elia Open Data API<br/>wind ods031 · solar ods032"]
+        OM["Open-Meteo API<br/>historical forecast + previous runs"]
+        DWDF[("data/dwd/gen_weather_dwd.parquet")]
+        HTTP["src/http_client.py<br/>session, retries"]
+        SRC["src/datasource.py<br/>download, region sampling,<br/>parquet cache in data/"]
+        FEAT["src/features.py<br/>15 min interpolation, merge with DWD,<br/>sin/cos directions"]
+        ELIA --> HTTP
+        OM --> HTTP
+        HTTP --> SRC
+        SRC --> FEAT
+        DWDF --> FEAT
+    end
+
+    DS["src/dataset.py<br/>load_dataset() → Dataset<br/>target + weather on 15 min UTC grid"]
+    FEAT --> DS
+
+    FS["src/feature_selection.py<br/>offline analysis: RandomForest<br/>permutation ranking of weather columns"]
+    DS --> FS
+
+    subgraph BACKTEST["2 · Rolling backtest (src/backtest.py)"]
+        REQ["build_request()<br/>one ForecastRequest per issue time<br/>(src/forecast.py)"]
+        subgraph TRAD["Traditional models"]
+            MT["src/models_traditional.py<br/>origin_aligned / fixed_gap features"]
+            ML["src/MLtrad.py<br/>XGBoost · LightGBM · CatBoost · NGBoost · TabNet"]
+            MT --> ML
+        end
+        subgraph TSFM["TSFMs"]
+            MTS["src/models_tsfm.py<br/>Chronos-2 · Timestral · TimesFM-3"]
+            LORA["tuning/train_*.py + src/tuning_data.py<br/>LoRA adapters, src/tsfm_runs.py records"]
+            LORA -.-> MTS
+        end
+        PCA["src/pca.py<br/>PCA of the weather covariates<br/>(fit on training period)"]
+        BASE["src/baselines.py<br/>Persistence"]
+        ENS["src/ensembles.py<br/>equal mean / top-K ensembles"]
+        REQ --> MT
+        REQ --> MTS
+        REQ --> BASE
+        ML -.-> PCA
+        MTS -.-> PCA
+        ML -- "q10 · q50 · q90" --> ENS
+    end
+
+    DS --> REQ
+
+    RES[("results/&lt;run&gt;.parquet + .json<br/>one row per issue time × step × model")]
+    ML --> RES
+    MTS --> RES
+    BASE --> RES
+    ENS --> RES
+
+    MET["src/metrics.py<br/>RMSE, Winkler 80%"]
+    PLT["src/plotter.py<br/>Matplotlib + Plotly charts"]
+    TRK["src/experiment_tracking.py<br/>MLflow"]
+    RES --> MET
+    RES --> PLT
+    RES --> TRK
+
+    MAIN["main.py<br/>terminal table + PNG in plots/"]
+    EVAL["evaluate_tsfm.py<br/>standalone TSFM evaluation"]
+    APP["app.py<br/>Streamlit dashboard:<br/>TSFM + traditional results"]
+    MET --> MAIN
+    PLT --> MAIN
+    MET --> APP
+    PLT --> APP
+    FS -. "ranking shown; ticked columns<br/>pre-fill the covariate picker" .-> APP
+    EVAL --> REQ
+    MAIN --> REQ
+    APP -- "Run a new backtest" --> REQ
+
+    CFG -.-> DS
+    CFG -.-> REQ
+```
+
 ### Adding a model
 Write a class implementing `Forecaster` (`src/forecast.py`): set `name`, `min_context`, `uses_covariates`, and implement `predict(requests) -> results`. For a TSFM, add its checkpoint to `MODELS_REGISTRY` and its inference adapter to `TSFM_ADAPTERS` in `src/models_tsfm.py`. The existing benchmark can then load it by key. The independent evaluator also needs a compatible cached snapshot and model loader; adapter evaluation additionally requires explicit model-specific loading support. Add a standalone trainer separately if fine-tuning is implemented. Do not add a model to `BACKTEST_MODELS` unless it should run in the default benchmark.
 
@@ -212,6 +296,7 @@ Write a class implementing `Forecaster` (`src/forecast.py`): set `name`, `min_co
   Federal (offshore) wind, so the grid points are the offshore parks.
 - **Open-Meteo** historical forecast API (https://open-meteo.com): hourly cloud cover and radiation at one point
   in Belgium, for the solar covariates.
+- **Wind power coordinates** taken from List of power stations in Belgium (https://en.wikipedia.org/wiki/List_of_power_stations_in_Belgium) and List of offshore wind farms in Belgium (https://en.wikipedia.org/wiki/List_of_offshore_wind_farms_in_Belgium). Use only coordinates with production above 5 MW to rule out small onshore wind power.
 
 ## Known limitations and next steps
 

@@ -1,0 +1,92 @@
+name;regions;lat;lon;capacity_mw
+C-Power (Thorntonbank);Federal;51.566647;3;325
+Belwind (Bligh Bank);Federal;51.6601;2.80004;171
+Northwind (Lodewijkbank);Federal;51.6192;2.9183;216
+NobelWind (Belwind II);Federal;51.66;2.82;165
+Rentel;Federal;51.5757;2.9188;307
+Norther;Federal;51.5135;2.99151;370
+Northwester 2;Federal;51.686111;2.759444;219
+SeaMade SeaStar;Federal;51.72;2.74;252
+SeaMade Mermaid;Federal;51.63;2.86;235.2
+Zephiros;Flanders;51.2975;5.100833;16.1
+Puurs;Flanders;51.079444;4.351944;6.9
+Noorderkempen;Flanders;51.348755;4.620039;22.1
+Lommel-Balendijk;Flanders;51.211944;5.258889;8
+Zeebrugge (Electrabel);Flanders;51.316111;3.185833;12
+Diest-Bekkevoort;Flanders;50.950278;5.052222;11.5
+Halen;Flanders;50.946944;5.046944;11.5
+Maaseik;Flanders;51.098889;5.684444;6
+Brecht;Flanders;51.3497;4.6377;6
+Wuustwezel-Hoogstraten;Flanders;51.3894;4.5912;16.1
+Bilzen-Riemst;Flanders;50.8719;5.5167;10.4
+Dilsen-Stokkem;Flanders;51.048056;5.698611;6
+Genk South II;Flanders;50.945833;5.480278;8
+Ham Albertkanaal;Flanders;51.094722;5.119444;8.1
+Lommel Kristalpark;Flanders;51.214167;5.270556;10
+Riemst E313;Flanders;50.810556;5.519444;10.4
+Tessenderlo Schoonhees;Flanders;51.054722;5.1125;9
+Brugge Pathoekeweg;Flanders;51.263056;3.213056;11.5
+Gistel;Flanders;51.167222;2.967222;9.2
+Ieper;Flanders;50.8492;2.8779;6.9
+Hoogstraten E19;Flanders;51.473333;4.731111;6.9
+Assenede;Flanders;51.229722;3.691667;12
+Dendermonde / DS Textile;Flanders;51.0255;4.102;6.7
+Haaltert;Flanders;50.877778;4.029444;9.2
+Zele;Flanders;51.056389;4.070278;6.9
+Ieperlee;Flanders;50.879722;2.878889;20.7
+Eeklo2/Ecopower;Flanders;51.179722;3.533056;8.8
+Melle;Flanders;50.980833;3.8175;6.9
+Kluizendok (Gent);Flanders;51.1627;3.7804;22
+Wondelgem/Volvo Trucks;Flanders;51.0905;3.7161;10
+BASF;Flanders;51.363333;4.296944;12
+Volvo Cars;Flanders;51.0997;3.7642;6.15
+Celanese;Flanders;50.88;5.655278;8
+Brugge I/III;Flanders;51.2093;3.2247;15.6
+Evolis;Flanders;50.8195;3.2577;8
+Maldegem;Flanders;51.216833;3.488889;16.1
+Berlare;Flanders;51.2091;3.4487;9.2
+Braemland I;Flanders;51.0174;4.0058;6
+Duikeldam;Flanders;51.18125;4.276389;8.2
+Lommel-Umicore;Flanders;51.203056;5.259167;8
+Gistelwind;Flanders;51.1563;2.9676;13.5
+Nike Wind Park;Flanders;51.0847;5.0308;9
+Industrieterrein Rotem;Flanders;51.043766;5.696164;12
+ICO Windpark;Flanders;51.332571;3.220907;44
+Greensky;Flanders;50.715061;5.062077;32
+Zeebrugge (Eneco);Flanders;51.315063;3.236475;12
+Marbais (+ext.);Wallonia;50.537361;4.515;22
+Gouvy;Wallonia;50.199528;5.935278;11.5
+Mettet/Fosse-la-Ville;Wallonia;50.370083;4.648889;25.3
+Perwez/Eghezée;Wallonia;50.606306;4.791667;14.5
+La Bruyère;Wallonia;50.5927;4.9036;10
+Mettet;Wallonia;50.32;4.6578;22
+Perwez ext. 2;Wallonia;50.611389;4.796944;5
+Spêches;Wallonia;50.547028;4.626111;9
+Pont-à-Celles;Wallonia;50.544444;4.345833;16
+Amblève/Amel;Wallonia;50.346944;6.222778;16
+Bastogne;Wallonia;50.0005;5.7153;6
+Le Roeulx;Wallonia;50.49;4.079722;9.2
+Villers (1-3);Wallonia;50.579972;5.24;22
+Berloz;Wallonia;50.697361;5.187222;6
+Walcourt;Wallonia;50.2539;4.4349;9
+Yvoir-Dinant;Wallonia;50.296083;4.983889;12
+Fernelmont;Wallonia;50.53325;4.962222;6.9
+Ciney-Sovet;Wallonia;50.2965;5.0364;20.25
+Bütgenbach;Wallonia;50.4266;6.2043;8
+Bullange;Wallonia;50.393972;6.32;12
+Vaux-sur-Sûre (Villeroux);Wallonia;49.988972;5.665833;12
+Leuze;Wallonia;50.599389;3.638889;20.5
+Saint-Vith;Wallonia;50.291222;6.085833;10.5
+Baileux;Wallonia;50.0287;4.3761;10
+Froidchapelle;Wallonia;50.215833;4.332222;25
+Cerfontaine;Wallonia;50.174972;4.494167;22
+Hoquigné/Chivremont;Wallonia;50.404694;6.097222;9.2
+Flamière (Halle);Wallonia;50.872986;4.309333;7.5
+Saint-Ode;Wallonia;50.027306;5.5925;15
+Bastogne Bourcy;Wallonia;50.0588;5.8084;17.5
+Dour;Wallonia;50.4;3.7828;28.9
+Tournai;Wallonia;50.6056;3.3879;16.1
+Quévy;Wallonia;50.380444;3.955278;18
+Levant de Mons;Wallonia;50.4345;3.9014;66
+Bièvre;Wallonia;49.953194;5.020556;14
+Estinnes;Wallonia;50.420207;4.076141;81.2

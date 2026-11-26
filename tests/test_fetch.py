@@ -1,0 +1,258 @@
+"""Live tests of the Elia and Open-Meteo fetch functions on a one day interval from config.DATA_START.
+
+They call the real APIs with the sources, regions and variables from config.py, so they need network access. The cache is redirected to a temporary directory, nothing is written to data/.
+"""
+import numpy as np
+import pandas as pd
+import pytest
+
+import config
+from src import datasource
+from src.datasource import (fetch_elia, fetch_elia_production, fetch_openmeteo_region, load_elia,
+                            load_previous_runs_openmeteo_region, reduce_openmeteo_region)
+from src.http_client import HttpClient, HttpError
+
+
+@pytest.fixture(scope="module")
+def interval() -> tuple[str, str]:
+    """[start, end) of one day, start = config.DATA_START."""
+    end = pd.Timestamp(config.DATA_START) + pd.Timedelta("1D")
+    return config.DATA_START, end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.fixture(scope="module", params=list(config.ELIA_SOURCES))
+def elia_source(request) -> tuple[str, dict]:
+    return request.param, config.ELIA_SOURCES[request.param]
+
+
+@pytest.fixture(scope="module")
+def openmeteo_source() -> dict:
+    return config.OPENMETEO_SOURCES
+
+
+@pytest.fixture(scope="module")
+def variables(openmeteo_source) -> list[str]:
+    return openmeteo_source["hourly_pv"] + openmeteo_source["hourly_wind"]
+
+
+@pytest.fixture
+def cache_in_tmp(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def no_requests():
+    """Client that fails on any request, to prove a result came from the cache."""
+    class Offline(HttpClient):
+        def _get(self, path, params):
+            raise AssertionError("cache not used, the API was called")
+    return Offline("https://offline.invalid")
+
+
+def assert_utc_index(index: pd.Index, start: str, end: str) -> None:
+    assert isinstance(index, pd.DatetimeIndex)
+    assert str(index.tz) == "UTC"
+    assert index.is_monotonic_increasing
+    assert index.min() >= pd.Timestamp(start)
+    assert index.max() < pd.Timestamp(end)
+
+
+# ==========================================
+# ------------- Elia -------------
+
+def test_fetch_elia_returns_one_column_per_region(elia_source, interval):
+    name, src = elia_source
+    start, end = interval
+    with HttpClient(src["base_url"]) as client:
+        df = fetch_elia(client, src["regions"], start, end, config.RESOLUTIONCODE)
+
+    steps_per_day = pd.Timedelta("1D") / pd.Timedelta(config.RESOLUTIONCODE)
+    assert 0 < len(df) <= steps_per_day, name
+    assert set(df.columns) <= set(src["regions"])
+    assert df.notna().any().all(), "every region needs at least one measurement"
+    assert (df.dropna(how="all") >= 0).all().all()
+    assert_utc_index(df.index, start, end)
+
+
+def test_fetch_elia_production_returns_energy_per_region(elia_source, interval):
+    _, src = elia_source
+    start, end = interval
+    with HttpClient(src["base_url"]) as client:
+        production = fetch_elia_production(client, src["regions"], start, end, config.RESOLUTIONCODE)
+
+    assert set(production.index) <= set(src["regions"])
+    assert len(production) > 0
+    assert (production >= 0).all()
+
+
+def test_fetch_elia_production_matches_summed_timeseries(elia_source, interval):
+    """The server side sum (MW per step * hours per step) equals the sum over the fetched time series."""
+    _, src = elia_source
+    start, end = interval
+    hours_per_step = pd.Timedelta(config.RESOLUTIONCODE) / pd.Timedelta("1h")
+    with HttpClient(src["base_url"]) as client:
+        series = fetch_elia(client, src["regions"], start, end, config.RESOLUTIONCODE)
+        production = fetch_elia_production(client, src["regions"], start, end, config.RESOLUTIONCODE)
+
+    expected = series.sum() * hours_per_step
+    pd.testing.assert_series_equal(production.sort_index(), expected.sort_index(), check_names=False,
+                                   check_dtype=False, rtol=1e-6)
+
+
+def test_load_elia_caches_and_reads_back(elia_source, interval, cache_in_tmp, no_requests):
+    name, src = elia_source
+    start, end = interval
+    with HttpClient(src["base_url"]) as client:
+        fetched = load_elia(name, client, src["regions"], start, end, config.RESOLUTIONCODE)
+
+    assert list(cache_in_tmp.rglob("*.parquet")), "load_elia must write the cache"
+    cached = load_elia(name, no_requests, src["regions"], start, end, config.RESOLUTIONCODE)
+    pd.testing.assert_frame_equal(cached, fetched)
+
+
+def test_elia_rejects_unknown_region(interval):
+    start, end = interval
+    src = config.ELIA_SOURCES["wind"]
+    with HttpClient(src["base_url"]) as client:
+        try:
+            df = fetch_elia(client, ["Atlantis"], start, end, config.RESOLUTIONCODE)
+        except (HttpError, KeyError, ValueError):
+            return
+    assert df.empty
+
+
+# ==========================================
+# ------------- Open-Meteo -------------
+
+@pytest.fixture(scope="module")
+def region_points() -> pd.DataFrame:
+    """Two points in Belgium, 0.5 degrees apart."""
+    return pd.DataFrame({"latitude": [50.2581, 50.7581], "longitude": [4.9117, 5.4117]})
+
+
+@pytest.fixture(scope="module")
+def region_data(openmeteo_source, variables, region_points, interval) -> pd.DataFrame:
+    start, end = interval
+    with HttpClient(openmeteo_source["base_url"], timeout=120) as client:
+        # chunk_size=1 sends one request per point, which also tests the chunking
+        return fetch_openmeteo_region(client, region_points, variables, start, end, chunk_size=1,
+                                      sleep_seconds=1.0)
+
+
+def test_fetch_openmeteo_region_returns_long_format(region_data, region_points, variables, interval):
+    start, end = interval
+    assert list(region_data.columns) == ["timestamp", "point", *variables]
+    assert sorted(region_data["point"].unique()) == list(range(len(region_points)))
+    assert (region_data.groupby("point").size() == 48).all()
+    assert (region_data[variables].dtypes == np.float32).all()
+    assert str(region_data["timestamp"].dt.tz) == "UTC"
+
+
+def test_fetch_openmeteo_region_single_chunk_equals_chunked(openmeteo_source, variables, region_points, region_data,
+                                                            interval):
+    """Both points in one request (a list response) give the same data as one request per point."""
+    start, end = interval
+    with HttpClient(openmeteo_source["base_url"], timeout=120) as client:
+        one_request = fetch_openmeteo_region(client, region_points, variables, start, end, chunk_size=10)
+
+    pd.testing.assert_frame_equal(one_request, region_data)
+
+
+def test_fetch_openmeteo_region_resumes_from_chunk_dir(openmeteo_source, variables, region_points, region_data,
+                                                       interval, tmp_path, no_requests):
+    start, end = interval
+    for first in range(len(region_points)):
+        region_data[region_data["point"] == first].to_parquet(tmp_path / f"points_{first:05d}.parquet")
+
+    resumed = fetch_openmeteo_region(no_requests, region_points, variables, start, end, chunk_size=1,
+                                     chunk_dir=tmp_path)
+
+    pd.testing.assert_frame_equal(resumed, region_data.reset_index(drop=True))
+
+
+# ==========================================
+# ------------- Open-Meteo previous runs -------------
+
+@pytest.fixture(scope="module")
+def previous_runs_interval() -> tuple[str, str]:
+    """[start, end) of one day, start = config.TEST_START: the previous runs are only stored from 2024 on."""
+    end = pd.Timestamp(config.TEST_START) + pd.Timedelta("1D")
+    return config.TEST_START, end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def previous_runs_columns(variables: list[str]) -> list[str]:
+    return [f"{v}{s}" for v in variables for s in config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]]
+
+
+def test_load_previous_runs_openmeteo_region_caches_and_reads_back(openmeteo_source, region_points,
+                                                                  previous_runs_interval, tmp_path, no_requests):
+    start, end = previous_runs_interval
+    wind = openmeteo_source["hourly_wind"][4:6]
+    args = (region_points, wind, start, end, tmp_path)
+    with HttpClient(openmeteo_source["previous_runs"]["base_url"], timeout=120) as client:
+        fetched = load_previous_runs_openmeteo_region("previous_runs", client, *args)
+
+    assert list(fetched.columns) == ["timestamp", "point", *previous_runs_columns(wind)]
+    assert sorted(fetched["point"].unique()) == [0, 1]
+    assert (fetched.groupby("point").size() == 48).all()
+    assert list(tmp_path.glob("*.parquet")), "the raw point data must be cached"
+
+    cached = load_previous_runs_openmeteo_region("previous_runs", no_requests, *args)
+    pd.testing.assert_frame_equal(cached, fetched)
+
+
+def test_load_previous_runs_openmeteo_region_chunks_by_call_weight(openmeteo_source, region_points, tmp_path,
+                                                                   monkeypatch):
+    """No network: the chunk size follows from the number of variables, days and the call budget."""
+    seen = {}
+
+    def spy(name, client, points, variables, start, end, directory, chunk_size):
+        seen.update(variables=variables, chunk_size=chunk_size)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(datasource, "load_openmeteo_region", spy)
+    wind = openmeteo_source["hourly_wind"]
+    start, end = "2025-01-01T00:00:00Z", "2025-01-15T00:00:00Z"   # 15 days, inclusive end date
+    calls_per_point = len(wind) * 3 / 10 * 15 / 14
+
+    monkeypatch.setitem(config.OPENMETEO_SETTINGS, "max_calls_per_request", 2 * calls_per_point + 0.1)
+    load_previous_runs_openmeteo_region("previous_runs", None, region_points, wind, start, end, tmp_path)
+    assert seen["chunk_size"] == 2
+    assert seen["variables"] == previous_runs_columns(wind)
+
+    monkeypatch.setitem(config.OPENMETEO_SETTINGS, "max_calls_per_request", 0.001)   # below one point: still one point
+    load_previous_runs_openmeteo_region("previous_runs", None, region_points, wind, start, end, tmp_path)
+    assert seen["chunk_size"] == 1
+
+
+def test_previous_runs_statistics_put_the_run_suffix_at_the_end(tmp_path, monkeypatch):
+    """No network: <variable>_<stat> is the most recent run, <variable>_<stat><suffix> the previous runs."""
+    suffixes = config.OPENMETEO_SOURCES["previous_runs"]["suffixes"]
+    variables = ["wind_speed_80m"]
+    index = pd.date_range("2025-01-01", periods=3, freq="h", tz="UTC")
+    raw = pd.concat([pd.DataFrame({"timestamp": index, "point": point,
+                                   **{f"{variables[0]}{suffix}": np.float32(point + number)
+                                      for number, suffix in enumerate(suffixes)}}) for point in (0, 1)],
+                    ignore_index=True)
+    monkeypatch.setattr(datasource, "load_previous_runs_openmeteo_region", lambda *args, **kwargs: raw)
+    points = pd.DataFrame({"latitude": [50.0, 50.0, 51.0], "longitude": [4.0, 4.0, 5.0]})  # point 0 drawn twice
+
+    stats = datasource.load_previous_runs_weather_statistics("previous_runs", None, points, variables,
+                                                             "2025-01-01T00:00:00Z", "2025-01-01T23:00:00Z", tmp_path)
+
+    assert set(stats.columns) == {f"wind_speed_80m_{stat}{suffix}" for suffix in suffixes
+                                  for stat in config.STATISTICAL_PROPERTIES}
+    # day 1 values are 1 (point 0) and 2 (point 1); point 0 weighs twice: mean (1 + 1 + 2) / 3
+    assert stats["wind_speed_80m_mean_previous_day1"].iloc[0] == pytest.approx(4 / 3)
+
+
+def test_reduce_openmeteo_region_gives_statistics_per_timestep(region_data, variables):
+    stats = reduce_openmeteo_region(region_data, variables)
+
+    assert len(stats) == 48
+    assert list(stats.columns) == [f"{v}_{s}" for v in variables for s in config.STATISTICAL_PROPERTIES]
+    assert stats.notna().all().all()
+    for variable in variables:
+        assert (stats[f"{variable}_min"] <= stats[f"{variable}_mean"] + 1e-4).all()
+        assert (stats[f"{variable}_mean"] <= stats[f"{variable}_max"] + 1e-4).all()
