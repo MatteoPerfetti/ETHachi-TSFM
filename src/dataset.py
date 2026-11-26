@@ -40,10 +40,12 @@ class RollingHorizon:
 
     @classmethod
     def daily(cls, start: str | pd.Timestamp, end: str | pd.Timestamp, issue_time: str, steps: int,
-              latency_steps: int) -> list["RollingHorizon"]:
-        """One horizon per day, issued at `issue_time` ("HH:MM", UTC), with the issue time in [start, end)."""
+              latency_steps: int, every_days: int = 1) -> list["RollingHorizon"]:
+        """One horizon every `every_days` days, issued at `issue_time` ("HH:MM", UTC), with the issue time in [start, end)."""
+        if every_days < 1:
+            raise ValueError(f"every_days must be >= 1, got {every_days}")
         start, end = pd.Timestamp(start), pd.Timestamp(end)
-        days = pd.date_range(start.normalize(), end.normalize(), freq="D")
+        days = pd.date_range(start.normalize(), end.normalize(), freq=f"{every_days}D")
         issues = days + pd.Timedelta(f"{issue_time}:00")
         return [cls(issue, steps, latency_steps=latency_steps) for issue in issues[(issues >= start) & (issues < end)]]
 

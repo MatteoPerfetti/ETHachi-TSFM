@@ -3,10 +3,16 @@ import pandas as pd
 import pytest
 
 from src import backtest, context_sweep
-from src.dataset import Dataset
+from src.dataset import Dataset, RollingHorizon
 from src.forecast import ForecastResult
 
 TEST_PERIOD = {"test_start": "2024-12-02T00:00:00Z", "test_end": "2024-12-06T00:00:00Z", "covariates": []}
+
+
+def issue_times(settings):
+    horizons = RollingHorizon.daily(settings.test_start, settings.test_end, settings.issue_time,
+                                    settings.horizon_steps, settings.latency_steps, settings.issue_every_days)
+    return [h.issue_time for h in horizons]
 
 
 class FakeModel:
@@ -59,12 +65,12 @@ def dataset(gap_at=None):
 def test_issue_every_days_thins_issue_times_and_names_the_run():
     daily = backtest.BacktestSettings(**TEST_PERIOD)
     weekly = backtest.BacktestSettings(issue_every_days=2, **TEST_PERIOD)
-    assert len(backtest.issue_times(daily)) == 4
-    assert list(backtest.issue_times(weekly).day) == [2, 4]
+    assert len(issue_times(daily)) == 4
+    assert [t.day for t in issue_times(weekly)] == [2, 4]
     assert "_every" not in daily.run_name
     assert weekly.run_name.endswith("_every2d")
     with pytest.raises(ValueError):
-        backtest.issue_times(backtest.BacktestSettings(issue_every_days=0, **TEST_PERIOD))
+        issue_times(backtest.BacktestSettings(issue_every_days=0, **TEST_PERIOD))
 
 
 def test_sweep_runs_each_context_and_persistence_once(fake_models, tmp_path):

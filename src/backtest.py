@@ -32,6 +32,7 @@ class BacktestSettings:
     train_start: str = config.TRAIN_START
     train_end: str = config.TRAIN_END
     issue_time: str = config.BACKTEST_ISSUE_TIME
+    issue_every_days: int = config.BACKTEST_ISSUE_EVERY_DAYS
     horizon_steps: int = config.BACKTEST_HORIZON_STEPS
     context_steps: int = config.BACKTEST_CONTEXT_STEPS
     latency_steps: int = config.BACKTEST_LATENCY_STEPS
@@ -44,7 +45,8 @@ class BacktestSettings:
     @property
     def run_name(self) -> str:
         """e.g. wind_ctx288_h156_lat0_cov7-1a2b3c_pca0.95: covariate count + short hash of the (sorted) covariate
-        names, plus the PCA setting if the covariates are condensed."""
+        names, plus the PCA setting if the covariates are condensed. A run on every N-th day gets the suffix
+        _everyNd."""
         if self.covariates:
             digest = hashlib.md5(",".join(sorted(self.covariates)).encode()).hexdigest()[:6]
             covariates = f"cov{len(self.covariates)}-{digest}"
@@ -52,8 +54,9 @@ class BacktestSettings:
                 covariates += f"_pca{self.pca_components}"
         else:
             covariates = "nocov"
+        every = f"_every{self.issue_every_days}d" if self.issue_every_days != 1 else ""
         return (f"{self.target_source}_ctx{self.context_steps}_h{self.horizon_steps}"
-                f"_lat{self.latency_steps}_{covariates}")
+                f"_lat{self.latency_steps}_{covariates}{every}")
 
 
 @dataclass
@@ -201,7 +204,7 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
     # Same issue times for every model: skip a day if any model would get incomplete data
     valid, skipped = [], []
     for horizon in RollingHorizon.daily(settings.test_start, settings.test_end, settings.issue_time,
-                                        settings.horizon_steps, settings.latency_steps):
+                                        settings.horizon_steps, settings.latency_steps, settings.issue_every_days):
         ok = _complete(dataset.target, horizon.context_start(max(context_steps.values())), horizon.last_valid_time)
         if ok and covariate_contexts:
             ok = _complete(dataset.weather[settings.covariates],

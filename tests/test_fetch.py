@@ -37,7 +37,7 @@ def variables(openmeteo_source) -> list[str]:
 
 @pytest.fixture
 def cache_in_tmp(tmp_path, monkeypatch):
-    monkeypatch.setattr(datasource, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     return tmp_path
 
 
