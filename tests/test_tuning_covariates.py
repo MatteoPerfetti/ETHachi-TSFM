@@ -209,3 +209,55 @@ def test_adapter_trained_with_covariates_needs_the_same_covariates(monkeypatch, 
     settings = backtest.BacktestSettings(covariates=settings_covariates, target_source="wind")
     with pytest.raises(ValueError, match=error):
         backtest.load_forecaster("lora:chronos2:cov", settings)
+
+
+def test_pca_training_inputs_use_the_components_the_backtest_fits():
+    from src.pca import fit_covariate_pca
+
+    target, weather = synthetic()
+    rng = np.random.default_rng(0)
+    weather = pd.DataFrame(rng.normal(size=weather.shape), index=weather.index, columns=weather.columns)
+    training, validation, _ = build_covariate_inputs(target, weather, 96, 156, COVARIATES, validation="weeks",
+                                                     validation_context=2880, pca_components=3)
+    assert list(training[0]["past_covariates"]) == ["pc_1", "pc_2", "pc_3"]
+    assert training[0]["future_covariates"] == {f"pc_{k}": None for k in (1, 2, 3)}
+    # the backtest fits the PCA in Forecaster.fit on weather.loc[train_start:train_end - STEP, covariates]
+    train = slice(pd.Timestamp(config.TRAIN_START), pd.Timestamp(config.TRAIN_END) - pd.Timedelta("15min"))
+    expected = fit_covariate_pca(3, weather.loc[train, COVARIATES]).transform(weather[COVARIATES])
+    np.testing.assert_allclose(training[0]["past_covariates"]["pc_2"], expected["pc_2"].to_numpy(), rtol=1e-5,
+                               atol=1e-5)
+    assert len(validation[0]["past_covariates"]) == 3
+
+
+def test_parse_pca_components():
+    from src.pca import parse_pca_components
+
+    assert parse_pca_components("none") is None
+    assert parse_pca_components("3") == 3 and isinstance(parse_pca_components("3"), int)
+    assert parse_pca_components("0.95") == 0.95
+    for bad in ("0", "1.5", "-2"):
+        with pytest.raises(ValueError):
+            parse_pca_components(bad)
+
+
+@pytest.mark.parametrize("recorded", [None, 0.95])
+def test_adapter_uses_its_recorded_pca_setting_not_the_backtest_one(monkeypatch, tmp_path, recorded):
+    """Adapters trained on raw covariates must never get principal components (and vice versa)."""
+    record = {"target": "wind_MW", "covariates": COVARIATES, "backend": "peft", "pca_components": recorded,
+              "base_checkpoint": config.MODELS_REGISTRY["timestral_209m"]["checkpoint"], "base_revision": "r"}
+    run_dir = tmp_path / "finetuning" / "timestral_209m" / "cov"
+    (run_dir / "finetuned-ckpt").mkdir(parents=True)
+    (run_dir / "finetuned-ckpt" / "adapter.safetensors").write_bytes(b"x")
+    monkeypatch.setattr("src.tsfm_runs.available_adapters", lambda: {"lora:timestral_209m:cov": record})
+    monkeypatch.setattr(config, "BACKTEST_RESULTS_DIR", tmp_path)
+    monkeypatch.setattr("tuning.train_timestral.load_lora_run", lambda run_dir, device: object())
+
+    class Fake:
+        def __init__(self, **options):
+            self.options = options
+
+    monkeypatch.setitem(__import__("src.models_tsfm", fromlist=["TSFM_ADAPTERS"]).TSFM_ADAPTERS, "timestral_209m", Fake)
+    for setting in (None, 0.95, 2):
+        settings = backtest.BacktestSettings(covariates=COVARIATES, target_source="wind", pca_components=setting,
+                                             device="cpu")
+        assert backtest.load_forecaster("lora:timestral_209m:cov", settings).options["pca_components"] == recorded

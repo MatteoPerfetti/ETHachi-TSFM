@@ -53,6 +53,18 @@ class CovariatePCA:
         return replace(request, past_covariates=self.transform(request.past_covariates), future_covariates=future)
 
 
+def parse_pca_components(text: str) -> int | float | None:
+    """Command-line PCA setting: "none", a whole number of components, or a share of variance in (0, 1)."""
+    if text.lower() == "none":
+        return None
+    value = float(text)
+    if value.is_integer() and value >= 1:
+        return int(value)
+    if not 0 < value < 1:
+        raise ValueError(f"PCA setting must be 'none', a number of components >= 1 or a share in (0, 1), got {text!r}")
+    return value
+
+
 def fit_covariate_pca(n_components: int | float | None, covariates: pd.DataFrame | None,
                       frame: pd.DataFrame | None = None) -> CovariatePCA | None:
     """PCA fitted on `frame` (default: `covariates`) for the columns of `covariates`, None if PCA is off."""

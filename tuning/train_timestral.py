@@ -17,6 +17,7 @@ from timestral.scaler import advancing_block_frames
 import config
 from src.forecast import STEP
 from src.metrics import rmse, winkler
+from src.pca import parse_pca_components
 from src.tuning_data import VALIDATION_START, load_covariate_inputs, load_windows
 from src.tsfm_runs import finish_training, start_training, write_record
 
@@ -163,7 +164,7 @@ def train(args: argparse.Namespace) -> Path:
     run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "timestral_209m" / args.run_id
     covariates = list(config.TSFM_COVARIATES["wind"]) if getattr(args, "covariates", "none") == "config" else []
     record = start_training(run_dir, "timestral_209m", args, BASE_CHECKPOINT, BASE_REVISION, "finetuned-ckpt",
-                            covariates=covariates)
+                            covariates=covariates, pca_components=getattr(args, "pca", None))
     try:
         return _train(args, run_dir, record)
     except BaseException as exc:
@@ -197,12 +198,14 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     if covariates:
         series, held_out, origins = load_covariate_inputs(context, horizon, covariates,
                                                           validation=validation_scheme,
-                                                          validation_context=validation_context)
-        windows, train_weather, eligible = covariate_windows(series[0], covariates, context, horizon)
+                                                          validation_context=validation_context,
+                                                          pca_components=run_record.get("pca_components"))
+        inputs = list(series[0]["past_covariates"])   # the raw covariates, or their principal components
+        windows, train_weather, eligible = covariate_windows(series[0], inputs, context, horizon)
         labels = label_windows(series[0], context, horizon)
         validation =torch.from_numpy(np.stack([window["target"] for window in held_out]))
         validation_weather = torch.from_numpy(np.stack([
-            [window["past_covariates"][name] for name in covariates] for window in held_out
+            [window["past_covariates"][name] for name in inputs] for window in held_out
         ]))
     else:
         if weeks:
@@ -331,6 +334,9 @@ if __name__ == "__main__":
     parser.add_argument("--validation", choices=("december", "weeks", "weeks-loss"),
                         help="defaults to weeks with covariates and December for target-only training; weeks-loss "
                              "hides the validation forecasts from the loss only, keeping them in training contexts")
+    parser.add_argument("--pca", type=parse_pca_components, default=None,
+                        help="condense the covariates by a PCA fitted on 2024: none (default), a number of components "
+                             "or a share of explained variance, e.g. 0.95")
     parser.add_argument("--lora-targets", choices=("attention-mlp", "attention"), default="attention-mlp")
     parser.add_argument("--gradient-accumulation", type=int, default=1)
     parser.add_argument("--scheduler", choices=("linear", "cosine", "quadratic"), default="linear",

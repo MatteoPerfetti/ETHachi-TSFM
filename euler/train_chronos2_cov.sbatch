@@ -32,6 +32,11 @@ BATCH_SIZE=${5:-8}
 RANK=${6:-8}
 SEED=${7:-42}
 EVAL_CONTEXT_STEPS=${EVAL_CONTEXT_STEPS:-2880}
+# PCA=0.95 (or a number of components) trains on the principal components of the covariates, fitted on 2024;
+# the evaluation then gives the same components to the adapter and to the zero-shot model. Default: none.
+PCA=${PCA:-none}
+# EVAL_START=2024-01-01T00:00:00Z evaluates 2024 (in-sample for the adapter) and 2025 in one rolling run.
+EVAL_START=${EVAL_START:-2025-01-01T00:00:00Z}
 VALIDATION=${VALIDATION:-december}
 # Early stopping (weeks validation only): validate every VALIDATION_INTERVAL steps and stop after PATIENCE
 # validations in a row without a relative D+1 RMSE improvement of MIN_IMPROVEMENT (default: 250 steps without a
@@ -50,12 +55,12 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export HF_HUB_OFFLINE=1                  # weights were downloaded on the login node (see euler/README.md)
 
 echo "Training $RUN_ID: $CONTEXT_DAYS days, $STEPS steps, lr $LEARNING_RATE, batch $BATCH_SIZE, rank $RANK," \
-     "seed $SEED, validation $VALIDATION on $(hostname), started $(date)"
+     "seed $SEED, validation $VALIDATION, PCA $PCA on $(hostname), started $(date)"
 .venv/bin/python -u -m tuning.train_chronos2 --run-id "$RUN_ID" --backend peft --covariates config \
     --context-days "$CONTEXT_DAYS" --steps "$STEPS" --batch-size "$BATCH_SIZE" --rank "$RANK" \
-    --learning-rate "$LEARNING_RATE" --seed "$SEED" --validation "$VALIDATION" ${EARLY_STOP[@]+"${EARLY_STOP[@]}"} --device cpu
+    --learning-rate "$LEARNING_RATE" --seed "$SEED" --validation "$VALIDATION" ${EARLY_STOP[@]+"${EARLY_STOP[@]}"} --pca "$PCA" --device cpu
 
-echo "Evaluating $RUN_ID on 2025 with a $EVAL_CONTEXT_STEPS-step context, started $(date)"
+echo "Evaluating $RUN_ID from $EVAL_START to 2025 with a $EVAL_CONTEXT_STEPS-step context, started $(date)"
 .venv/bin/python -u evaluate_tsfm.py --model chronos2 --adapter-run-id "$RUN_ID" --covariates config \
-    --context-steps "$EVAL_CONTEXT_STEPS" --device cpu
+    --context-steps "$EVAL_CONTEXT_STEPS" --start "$EVAL_START" --device cpu
 echo "Finished $(date)"

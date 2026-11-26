@@ -7,15 +7,17 @@ import pandas as pd
 import config
 from src.backtest import BacktestSettings, run_recorded_backtest
 from src.dataset import Dataset
+from src.pca import parse_pca_components
 from src.tsfm_runs import read_record, wind_path
 
 
 def evaluate(model_key: str, run_dir: Path | None, start: str, end: str,
              context: int, horizon: int, device: str = "cpu", covariates: list[str] | None = None,
-             delta_run_id: str | None = None) -> Path:
+             delta_run_id: str | None = None, pca_components: int | float | None = None) -> Path:
     """Rolling backtest of the zero-shot model (and the adapter); `covariates` are weather columns, [] = wind-only.
 
-    `delta_run_id` adds a δY output adapter (results/finetuning/delta_y/<id>) on top of its recorded base model.
+    `pca_components` condenses the covariates of the zero-shot model (an adapter always uses its recorded PCA
+    setting, see src.backtest.load_forecaster). `delta_run_id` adds a δY output adapter (results/finetuning/delta_y/<id>) on top of its recorded base model.
     """
     covariates = list(covariates or [])
     if delta_run_id:
@@ -45,7 +47,8 @@ def evaluate(model_key: str, run_dir: Path | None, start: str, end: str,
     settings = BacktestSettings(test_start=start.tz_convert("UTC").isoformat(),
                                 test_end=end.tz_convert("UTC").isoformat(),
                                 context_steps=context, horizon_steps=horizon,
-                                latency_steps=0, covariates=covariates, target_source="wind", device=device)
+                                latency_steps=0, covariates=covariates, target_source="wind", device=device,
+                                pca_components=pca_components if covariates else None)
     if covariates:
         from src.dataset import load_dataset
         dataset = load_dataset("wind")  # same target and weather as the dashboard and main.py
@@ -73,6 +76,9 @@ if __name__ == "__main__":
     parser.add_argument("--device", choices=("cpu", "cuda", "xpu"), default="cpu")
     parser.add_argument("--covariates", choices=("none", "config"), default="none",
                         help="config: pass config.TSFM_COVARIATES['wind'] to the models (needed for covariate adapters)")
+    parser.add_argument("--pca",
+                        help="PCA of the covariates for the zero-shot model: none, a number of components or a share "
+                             "of variance; defaults to the adapter's training setting, else none")
     parser.add_argument("--delta-run-id", help="also evaluate this delta-Y output adapter (tuning/train_delta_y.py)")
     args = parser.parse_args()
     for run_id in (args.adapter_run_id, args.delta_run_id):
@@ -81,4 +87,9 @@ if __name__ == "__main__":
     path = (config.BACKTEST_RESULTS_DIR / "finetuning" / args.model / args.adapter_run_id
             if args.adapter_run_id else None)
     covariates = list(config.TSFM_COVARIATES["wind"]) if args.covariates == "config" else []
-    print(f"Saved evaluation: {evaluate(args.model, path, args.start, args.end, args.context_steps, args.horizon_steps, args.device, covariates, args.delta_run_id)}")
+    try:
+        pca = (parse_pca_components(args.pca) if args.pca is not None
+               else read_record(path).get("pca_components") if path else None)
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(f"Saved evaluation: {evaluate(args.model, path, args.start, args.end, args.context_steps, args.horizon_steps, args.device, covariates, args.delta_run_id, pca)}")
