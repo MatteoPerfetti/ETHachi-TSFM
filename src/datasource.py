@@ -323,7 +323,7 @@ def sample_points(probabilities: pd.Series, sample_in_region: RegionSampler, n: 
 def load_nuts_geometries(client: HttpClient, nuts_ids: dict[str, str]) -> dict[str, BaseGeometry]:
     """Return the Nuts2json polygon of each region, keyed by region name. nuts_ids maps region name -> NUTS id.
 
-    The GeoJSON is cached under data/solar-region, named after its version, projection, scale and level.
+    The GeoJSON is cached under data/solar, named after its version, projection, scale and level.
     """
     cache_dir = config.OPENMETEO_SOURCES["weather_sampling"]["solar"]["cache_dir"]
     text = cached("NUTS polygons", cache_dir / "_".join(client.base_url.split("/")[-4:]), client.get_text,

@@ -259,7 +259,7 @@ OPENMETEO_SOURCES = {
         "solar": {
             "n_samples": 200,
             "seed": 42,
-            "cache_dir": DATA_DIR / "solar-region",
+            "cache_dir": DATA_DIR / "solar",
             "nuts": {
                 "Brussels": "BE10",
                 "Antwerp": "BE21",
@@ -278,7 +278,7 @@ OPENMETEO_SOURCES = {
         "wind": {
             "n_samples": 20,
             "seed": 42,
-            "cache_dir": DATA_DIR / "wind-region",
+            "cache_dir": DATA_DIR / "wind",
             "farms_path": INPUTS_DIR / "belgium_wind_farms.csv",
         },
     },

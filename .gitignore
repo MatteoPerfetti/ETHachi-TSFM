@@ -6,12 +6,8 @@ claude/
 data/cache/
 data/features/
 data/solar/
-data/solar-region/
 data/target/
-data/weather/
-data/weather-region/
 data/wind/
-data/wind-region/
 plots/
 results/
 
