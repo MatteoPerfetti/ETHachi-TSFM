@@ -67,6 +67,42 @@ def test_held_out_weeks_validate_with_30_days_and_hide_their_forecasts_from_trai
     assert np.isfinite(series[[first_hidden - 1, last_hidden + 1]]).all()
 
 
+def test_weeks_loss_keeps_the_real_target_and_marks_the_same_forecasts_in_a_loss_mask():
+    target, weather = synthetic(start="2024-01-01", end="2025-01-01")
+    args = (target, weather, 96, 156, COVARIATES)
+    hidden_training, hidden_validation, hidden_origins = build_covariate_inputs(
+        *args, validation="weeks", validation_context=2880)
+    training, validation, origins = build_covariate_inputs(*args, validation="weeks-loss", validation_context=2880)
+    assert origins == hidden_origins
+    for window, hidden_window in zip(validation, hidden_validation):
+        np.testing.assert_array_equal(window["target"], hidden_window["target"])
+    series = training[0]
+    np.testing.assert_array_equal(series["target"], target.to_numpy(dtype=np.float32))   # no gaps
+    np.testing.assert_array_equal(series["loss_mask"], np.isnan(hidden_training[0]["target"]))
+
+
+def test_timestral_weeks_loss_batches_have_real_contexts_and_no_held_out_labels():
+    from tuning.train_timestral import covariate_windows, label_windows, training_batch
+
+    values = np.arange(12, dtype=np.float32)
+    mask = np.zeros(12, dtype=bool)
+    mask[4:7] = True                                     # held-out steps 4, 5, 6
+    inputs = {"target": values, "past_covariates": {"c1": values + OFFSET}, "loss_mask": mask}
+    context, horizon = 3, 3
+    windows, weather, eligible = covariate_windows(inputs, ["c1"], context, horizon)
+    labels = label_windows(inputs, context, horizon)
+    # window k: context k..k+2, labels k+3..k+5; only k=1 (labels 4, 5, 6) has no label left for the loss
+    assert eligible.tolist() == [0, 2, 3, 4, 5, 6]
+    batch = training_batch(windows, labels, eligible, context).numpy()
+    np.testing.assert_array_equal(batch[:, :context], [values[k:k + 3] for k in (0, 2, 3, 4, 5, 6)])   # no gaps
+    np.testing.assert_array_equal(batch[0, context:], [3, np.nan, np.nan])                        # 4, 5 hidden
+    np.testing.assert_array_equal(batch[1, context:], [np.nan, np.nan, 7])                     # 5, 6 hidden
+    np.testing.assert_array_equal(batch[3, :context], [4, 5, 6])     # held-out values usable as history
+    np.testing.assert_array_equal(batch[3, context:], [7, 8, 9])
+    np.testing.assert_array_equal(training_batch(windows, None, eligible, context).numpy(), windows[eligible].numpy())
+    assert label_windows({"target": values}, context, horizon) is None
+
+
 def test_missing_values_in_training_period_raise():
     target, weather = synthetic()
     weather.iloc[500, 2] = np.nan

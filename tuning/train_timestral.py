@@ -112,21 +112,51 @@ def evaluate(forecaster: TimestralForecaster, windows: torch.Tensor, context: in
     return scores
 
 
+def _observed_counts(values: torch.Tensor) -> torch.Tensor:
+    observed = torch.isfinite(values).to(torch.int64)
+    return torch.cat((observed.new_zeros(1), observed.cumsum(dim=0)))
+
+
 def covariate_windows(inputs: dict, covariates: list[str], context: int,
                       horizon: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Use aligned rolling views and sample windows with at least one observed context and label value."""
+    """Use aligned rolling views and sample windows with at least one observed context and label value.
+
+    With a "loss_mask" in `inputs` ("weeks-loss" validation) the labels are counted without the masked steps:
+    see `label_windows`, which gives the labels the loss must use for those inputs."""
     length = context + horizon
     target = torch.from_numpy(inputs["target"])
     weather = torch.from_numpy(np.stack([inputs["past_covariates"][name] for name in covariates]))
-    observed = torch.isfinite(target).to(torch.int64)
-    counts = torch.cat((observed.new_zeros(1), observed.cumsum(dim=0)))
-    at_forecast_start = counts[context:-horizon]
-    past = at_forecast_start - counts[:-length]
-    future = counts[length:] - at_forecast_start
+    history_counts = _observed_counts(target)
+    label_counts = history_counts if "loss_mask" not in inputs else _observed_counts(_masked_labels(inputs))
+    past = history_counts[context:-horizon] - history_counts[:-length]
+    future = label_counts[length:] - label_counts[context:-horizon]
     eligible = torch.where((past > 0) & (future > 0))[0]
     if not len(eligible):
         raise ValueError("No training windows with both observed context and forecast targets")
     return target.unfold(0, length, 1), weather.unfold(-1, length, 1).transpose(0, 1), eligible
+
+
+def _masked_labels(inputs: dict) -> torch.Tensor:
+    labels = torch.from_numpy(inputs["target"]).clone()
+    labels[torch.from_numpy(np.asarray(inputs["loss_mask"], dtype=bool))] = torch.nan
+    return labels
+
+
+def label_windows(inputs: dict, context: int, horizon: int) -> torch.Tensor | None:
+    """Rolling views of the training labels when held-out steps are hidden from the loss only, else None.
+
+    A training batch then takes its context from `covariate_windows` (real values, no gaps) and its last
+    `horizon` steps from these views, where the held-out steps are NaN and so left out of the loss."""
+    if "loss_mask" not in inputs:
+        return None
+    return _masked_labels(inputs).unfold(0, context + horizon, 1)
+
+
+def training_batch(windows: torch.Tensor, labels: torch.Tensor | None, indices: torch.Tensor,
+                   context: int) -> torch.Tensor:
+    if labels is None:
+        return windows[indices]
+    return torch.cat((windows[indices][:, :context], labels[indices][:, context:]), dim=1)
 
 
 def train(args: argparse.Namespace) -> Path:
@@ -161,15 +191,16 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     torch.manual_seed(args.seed)
     covariates = run_record["covariates"]
     validation_scheme = getattr(args, "validation", None) or ("weeks" if covariates else "december")
-    weeks = validation_scheme == "weeks"
+    weeks = validation_scheme in ("weeks", "weeks-loss")
     validation_context = int(pd.Timedelta(days=30) / STEP) if weeks else context
-    train_weather = validation_weather = d1 = None
+    train_weather = validation_weather = d1 = labels = None
     if covariates:
         series, held_out, origins = load_covariate_inputs(context, horizon, covariates,
                                                           validation=validation_scheme,
                                                           validation_context=validation_context)
         windows, train_weather, eligible = covariate_windows(series[0], covariates, context, horizon)
-        validation = torch.from_numpy(np.stack([window["target"] for window in held_out]))
+        labels = label_windows(series[0], context, horizon)
+        validation =torch.from_numpy(np.stack([window["target"] for window in held_out]))
         validation_weather = torch.from_numpy(np.stack([
             [window["past_covariates"][name] for name in covariates] for window in held_out
         ]))
@@ -233,7 +264,7 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
         for _ in range(args.gradient_accumulation):
             indices = eligible[torch.randint(len(eligible), (args.batch_size,), generator=sampler)]
             known = None if train_weather is None else train_weather[indices]
-            loss = training_loss(forecaster, windows[indices], context, known)
+            loss = training_loss(forecaster, training_batch(windows, labels, indices, context), context, known)
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite Timestral loss at step {step}")
             (loss / args.gradient_accumulation).backward()
@@ -297,8 +328,9 @@ if __name__ == "__main__":
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--covariates", choices=("none", "config"), default="none",
                         help="config: use the configured wind weather covariates over context and horizon")
-    parser.add_argument("--validation", choices=("december", "weeks"),
-                        help="defaults to weeks with covariates and December for target-only training")
+    parser.add_argument("--validation", choices=("december", "weeks", "weeks-loss"),
+                        help="defaults to weeks with covariates and December for target-only training; weeks-loss "
+                             "hides the validation forecasts from the loss only, keeping them in training contexts")
     parser.add_argument("--lora-targets", choices=("attention-mlp", "attention"), default="attention-mlp")
     parser.add_argument("--gradient-accumulation", type=int, default=1)
     parser.add_argument("--scheduler", choices=("linear", "cosine", "quadratic"), default="linear",
@@ -329,6 +361,6 @@ if __name__ == "__main__":
         parser.error("warmup is available with --scheduler cosine")
     if args.scheduler == "quadratic" and not 0 < args.final_learning_rate <= args.learning_rate:
         parser.error("--final-learning-rate must be positive and at most --learning-rate")
-    if args.validation == "weeks" and args.covariates == "none":
-        parser.error("--validation weeks requires --covariates config")
+    if args.validation in ("weeks", "weeks-loss") and args.covariates == "none":
+        parser.error(f"--validation {args.validation} requires --covariates config")
     print(f"Saved and verified {train(args)}", flush=True)

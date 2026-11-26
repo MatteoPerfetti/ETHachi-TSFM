@@ -8,6 +8,10 @@ Two validation schemes for the covariate inputs:
 - "weeks": the 09:00 forecasts of days 1-7 of every month of 2024 whose history allows the validation context
   (January has none: the data starts on 28 December 2023). Training covers all of 2024, with the target set to
   NaN over every validation forecast, so no training window learns from (or sees) a held-out value.
+- "weeks-loss": the same validation forecasts, but the training target keeps its real values and the training input
+  gets a boolean "loss_mask" (True over every validation forecast). The trainer leaves those steps out of the loss
+  only, so training contexts have no gaps (as in the 2025 test) while no held-out value is ever a label.
+  Timestral trainer only; Chronos2Pipeline.fit does not accept the extra key.
 """
 
 import numpy as np
@@ -19,7 +23,7 @@ from src.forecast import STEP
 
 
 VALIDATION_START = pd.Timestamp("2024-12-01T00:00:00Z")
-VALIDATION_SCHEMES = ("december", "weeks")
+VALIDATION_SCHEMES = ("december", "weeks", "weeks-loss")
 HELD_OUT_DAYS = 7  # "weeks": days 1-7 of every month are validation forecasts
 
 
@@ -77,8 +81,9 @@ def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: in
     if missing:
         raise ValueError(f"Covariates not in the weather data: {missing}")
     frame = weather[covariates].join(target.rename("__target__"), how="outer")
-    if validation == "weeks":
-        return _held_out_weeks(frame, context, horizon, covariates, validation_context or context)
+    if validation in ("weeks", "weeks-loss"):
+        return _held_out_weeks(frame, context, horizon, covariates, validation_context or context,
+                               hide_context=validation == "weeks")
 
     train_index = pd.date_range(pd.Timestamp(config.TRAIN_START), VALIDATION_START, freq=STEP, inclusive="left")
     train = frame.reindex(train_index)
@@ -105,8 +110,10 @@ def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: in
 
 
 def _held_out_weeks(frame: pd.DataFrame, context: int, horizon: int, covariates: list[str],
-                    validation_context: int) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
-    """The "weeks" scheme: validation forecasts on days 1-7 of each month, hidden from the training target."""
+                    validation_context: int, hide_context: bool = True
+                    ) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
+    """Validation forecasts on days 1-7 of each month. hide_context=True ("weeks") sets the training target to NaN
+    over them; False ("weeks-loss") keeps the target and marks them in a "loss_mask" of the training input."""
     train_start, train_end = pd.Timestamp(config.TRAIN_START), pd.Timestamp(config.TRAIN_END)
     issue_offset = pd.Timedelta(f"{config.BACKTEST_ISSUE_TIME}:00")
     validation, origins = [], []
@@ -133,6 +140,8 @@ def _held_out_weeks(frame: pd.DataFrame, context: int, horizon: int, covariates:
     for origin in origins:
         first = train.index.get_loc(origin)
         held_out[first:first + horizon] = True
+    if not hide_context:
+        return [{**_chronos_input(train["__target__"], train, covariates), "loss_mask": held_out}], validation, origins
     train.loc[held_out, "__target__"] = np.nan   # Chronos masks NaN targets in the context and in the loss
     return [_chronos_input(train["__target__"], train, covariates)], validation, origins
 
