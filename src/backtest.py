@@ -87,10 +87,6 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         if trained_with and sorted(trained_with) != sorted(settings.covariates):
             raise ValueError(f"{model_key} was trained with the covariates {trained_with}; "
                              f"select exactly these for the backtest (got {list(settings.covariates)})")
-        # Timestral reads the covariates by position (a [batch, covariate, time] tensor), Chronos-2 by name
-        if trained_with and family == "timestral_209m" and list(trained_with) != list(settings.covariates):
-            raise ValueError(f"{model_key} reads its covariates by position; select them in the training order "
-                             f"{trained_with} (got {list(settings.covariates)})")
         # The adapters are trained on the raw covariates: refuse principal components instead of feeding them
         if trained_with and settings.pca_components is not None:
             raise ValueError(f"{model_key} was trained on the raw covariates; turn the covariate PCA off "
@@ -110,6 +106,8 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         tuned = load_lora_run(run_dir, device)
         forecaster = TSFM_ADAPTERS[family](device=device, model=tuned, name=f"{family} LoRA ({run_id})",
                                            pca_components=settings.pca_components)
+        if trained_with and family == "timestral_209m":
+            forecaster.covariate_order = list(trained_with)   # pick the request covariates by name, training order
         forecaster.load_seconds = time.perf_counter() - start
         forecaster.configuration = {"model_key": family, "run_id": run_id,
             "base_checkpoint": record["base_checkpoint"], "base_revision": record["base_revision"],

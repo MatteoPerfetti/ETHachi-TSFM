@@ -200,7 +200,7 @@ def test_random_training_windows_cut_target_and_covariates_at_the_same_timestamp
     ("chronos2", [], None, "trained with the covariates"),
     ("chronos2", COVARIATES[:3], None, "trained with the covariates"),
     ("chronos2", list(reversed(COVARIATES)), None, "Adapter files missing"),   # Chronos reads by name: any order
-    ("timestral_209m", list(reversed(COVARIATES)), None, "by position"),       # Timestral reads by position
+    ("timestral_209m", list(reversed(COVARIATES)), None, "Adapter files missing"),  # Timestral: picked by name
     ("timestral_209m", COVARIATES, None, "Adapter files missing"),            # training order: passes the checks
     ("chronos2", COVARIATES, 0.95, "turn the covariate PCA off"),             # raw-covariate adapter, PCA on
 ])
@@ -213,3 +213,32 @@ def test_adapter_trained_with_covariates_needs_the_same_covariates(monkeypatch, 
     settings = backtest.BacktestSettings(covariates=settings_covariates, target_source="wind", pca_components=pca)
     with pytest.raises(ValueError, match=error):
         backtest.load_forecaster(f"lora:{family}:cov", settings)
+
+
+def test_timestral_adapter_picks_covariates_by_name_in_the_training_order():
+    """A Timestral LoRA gets the same input tensor whatever the column order of the request covariates."""
+    from src.forecast import ForecastRequest
+    from src.models_tsfm import TimestralAdapter
+
+    class Model:
+        def forecast(self, context, prediction_length, **covariates):
+            self.covariates = covariates
+            quantiles = np.zeros((len(context), 1, prediction_length))
+            return type("Forecast", (), {"quantile": lambda _, level: quantiles})()
+
+    index = pd.date_range("2025-01-01", periods=8, freq="15min", tz="UTC")
+    weather = pd.DataFrame({name: np.arange(8.0) + k * 100 for k, name in enumerate(COVARIATES[:3])}, index=index)
+
+    def known(columns, order):
+        adapter = object.__new__(TimestralAdapter)
+        adapter.model, adapter.covariate_order = Model(), order
+        request = ForecastRequest(issue_time=index[4], forecast_index=index[4:], context=pd.Series(1.0, index=index[:4]),
+                                  past_covariates=weather[columns].iloc[:4], future_covariates=weather[columns].iloc[4:])
+        adapter._predict_batch([request])
+        return adapter.model.covariates["known_covariates"]
+
+    trained = COVARIATES[:3]
+    expected = known(trained, trained)
+    np.testing.assert_array_equal(expected[0, :, 0], [0, 100, 200])                  # channel k = covariate k
+    np.testing.assert_array_equal(known(trained[::-1], trained), expected)           # reversed request: same tensor
+    np.testing.assert_array_equal(known(trained[::-1], None)[0, :, 0], [200, 100, 0])  # zero-shot: request order
