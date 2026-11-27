@@ -108,9 +108,7 @@ def available_delta_adapters(root: Path | None = None) -> dict[str, dict]:
 
 
 def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: str, adapter: str,
-                   covariates: list[str] | None = None, pca_components: int | float | None = None) -> dict:
-    """Write the running run.json; `covariates` are the raw weather columns, condensed by a PCA with
-    `pca_components` (fitted on the training period, as in the backtest) when it is not None."""
+                   covariates: list[str] | None = None) -> dict:
     run_dir.mkdir(parents=True, exist_ok=False)
     try:
         try:
@@ -133,8 +131,7 @@ def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: s
                   "base_checkpoint": checkpoint, "base_revision": revision, "adapter_path": adapter,
                   "parameters": vars(args).copy(), "dataset": {"path": str(source),
                   "sha256": fingerprint(source), "resolution": config.RESOLUTIONCODE},
-                  "covariates": list(covariates or []),
-                  "pca_components": pca_components if covariates else None}
+                  "covariates": list(covariates or [])}
         if covariates:
             weather = Path(config.OPENMETEO_SOURCES["dwd"]["path"])
             record["dataset"]["weather"] = {"path": str(weather), "sha256": fingerprint(weather)}

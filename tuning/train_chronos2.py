@@ -18,7 +18,6 @@ from torch import nn
 import config
 from src.forecast import STEP
 from src.metrics import rmse, winkler
-from src.pca import parse_pca_components
 from src.tuning_data import VALIDATION_START, load_covariate_inputs, load_windows
 from src.tsfm_runs import finish_training, start_training, write_record
 
@@ -278,7 +277,7 @@ def train(args: argparse.Namespace) -> Path:
     run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / "chronos2" / args.run_id
     record = start_training(run_dir, "chronos2", args, BASE_CHECKPOINT, BASE_REVISION,
                             "finetuned-ckpt" if args.backend == "peft" else "adapter.safetensors",
-                            covariates=training_covariates(args), pca_components=getattr(args, "pca", None))
+                            covariates=training_covariates(args))
     try:
         return _train(args, run_dir, record)
     except BaseException as exc:
@@ -315,8 +314,7 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
         raise ValueError("--validation weeks selects on D+1, which the forecast horizon does not reach")
     if covariates:
         training, validation, origins = load_covariate_inputs(context, horizon, covariates,
-                                                              "weeks" if weeks else "december", validation_context,
-                                                              getattr(args, "pca", None))
+                                                              "weeks" if weeks else "december", validation_context)
         window_count = len(training[0]["target"]) - context - horizon + 1
     else:
         training, validation, origins = load_windows(context, horizon)
@@ -413,9 +411,6 @@ if __name__ == "__main__":
     parser.add_argument("--covariates", choices=("none", "config"), default="none",
                         help="config: train with config.TSFM_COVARIATES['wind'] as known future covariates "
                              "(PEFT backend only)")
-    parser.add_argument("--pca", type=parse_pca_components, default=None,
-                        help="condense the covariates by a PCA fitted on 2024: none (default), a number of components "
-                             "or a share of explained variance, e.g. 0.95")
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--seed", type=int, default=42)

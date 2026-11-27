@@ -64,12 +64,8 @@ def _chronos_input(target: pd.Series, weather: pd.DataFrame, covariates: list[st
 
 def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: int, horizon: int,
                            covariates: list[str], validation: str = "december",
-                           validation_context: int | None = None, pca_components: int | float | None = None
-                           ) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
+                           validation_context: int | None = None) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
     """Training series and validation windows with covariates (see the module docstring for the schemes).
-
-    With `pca_components`, the covariates are replaced by their principal components (keys pc_1, pc_2, ... in
-    past_covariates), fitted exactly as the backtest fits them for the adapter (see condense_covariates).
 
     The training input is one continuous series: Chronos2Dataset draws random windows of `context` steps plus
     `horizon` steps from it, cutting target and covariates at the same timestamps. Each validation input covers
@@ -84,8 +80,6 @@ def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: in
     missing = sorted(set(covariates) - set(weather.columns))
     if missing:
         raise ValueError(f"Covariates not in the weather data: {missing}")
-    if pca_components is not None:
-        weather, covariates = condense_covariates(weather, covariates, pca_components)
     frame = weather[covariates].join(target.rename("__target__"), how="outer")
     if validation in ("weeks", "weeks-loss"):
         return _held_out_weeks(frame, context, horizon, covariates, validation_context or context,
@@ -113,19 +107,6 @@ def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: in
     if not validation:
         raise ValueError("No complete December validation windows")
     return training, validation, origins
-
-
-def condense_covariates(weather: pd.DataFrame, covariates: list[str], pca_components: int | float
-                        ) -> tuple[pd.DataFrame, list[str]]:
-    """Principal components of `covariates`, fitted on the same rows as the backtest's fit (TRAIN_START up to one
-    step before TRAIN_END), so an adapter is evaluated on the components it was trained on. Rows missing a
-    covariate stay NaN."""
-    from src.pca import fit_covariate_pca
-
-    train = slice(pd.Timestamp(config.TRAIN_START), pd.Timestamp(config.TRAIN_END) - STEP)
-    pca = fit_covariate_pca(pca_components, weather.loc[train, covariates])
-    complete = weather[covariates].dropna()
-    return pca.transform(complete).reindex(weather.index), pca.component_columns
 
 
 def _held_out_weeks(frame: pd.DataFrame, context: int, horizon: int, covariates: list[str],
@@ -166,11 +147,10 @@ def _held_out_weeks(frame: pd.DataFrame, context: int, horizon: int, covariates:
 
 
 def load_covariate_inputs(context: int, horizon: int, covariates: list[str], validation: str = "december",
-                          validation_context: int | None = None, pca_components: int | float | None = None
-                          ) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
+                          validation_context: int | None = None) -> tuple[list[dict], list[dict], list[pd.Timestamp]]:
     """Wind target and weather exactly as the backtest sees them (src.dataset.load_dataset), as Chronos inputs."""
     from src.dataset import load_dataset
 
     dataset = load_dataset("wind")
     return build_covariate_inputs(dataset.target, dataset.weather, context, horizon, covariates,
-                                  validation, validation_context, pca_components)
+                                  validation, validation_context)

@@ -100,10 +100,8 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         device = settings.device or default_device()
         start = time.perf_counter()
         tuned = load_lora_run(run_dir, device)
-        # An adapter sees its covariates exactly as in training: condensed by the recorded PCA setting (None for
-        # every adapter trained before PCA existed), whatever settings.pca_components says.
         forecaster = TSFM_ADAPTERS[family](device=device, model=tuned, name=f"{family} LoRA ({run_id})",
-                                           pca_components=record.get("pca_components"))
+                                           pca_components=settings.pca_components)
         forecaster.load_seconds = time.perf_counter() - start
         forecaster.configuration = {"model_key": family, "run_id": run_id,
             "base_checkpoint": record["base_checkpoint"], "base_revision": record["base_revision"],
