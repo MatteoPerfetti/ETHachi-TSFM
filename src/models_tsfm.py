@@ -152,6 +152,9 @@ class Chronos2Adapter(TSFMAdapter):
 class TimestralAdapter(TSFMAdapter):
     name = "Timestral-209M"
     model_key = "timestral_209m"
+    # Timestral reads covariates by position (axis C). A LoRA adapter sets its training order here, so the request
+    # columns are picked by name in that order; None keeps the request's own column order (zero-shot).
+    covariate_order: list[str] | None = None
 
     def _load(self, checkpoint: str) -> TimestralForecaster:
         from timestral import TimestralForecaster
@@ -166,12 +169,16 @@ class TimestralAdapter(TSFMAdapter):
         context = np.stack([request.context.to_numpy(np.float32) for request in batch])[:, None, :]
 
         covariates = {}
-        if batch[0].future_covariates is not None:
-            covariates["known_covariates"] = np.stack([
-                np.concatenate([r.past_covariates.to_numpy(np.float32), r.future_covariates.to_numpy(np.float32)]).T
-                for r in batch])
-        elif batch[0].past_covariates is not None:
-            covariates["past_covariates"] = np.stack([r.past_covariates.to_numpy(np.float32).T for r in batch])
+        if batch[0].past_covariates is not None:
+            columns = self.covariate_order or list(batch[0].past_covariates.columns)
+            if batch[0].future_covariates is not None:
+                covariates["known_covariates"] = np.stack([
+                    np.concatenate([r.past_covariates[columns].to_numpy(np.float32),
+                                    r.future_covariates[columns].to_numpy(np.float32)]).T
+                    for r in batch])
+            else:
+                covariates["past_covariates"] = np.stack([r.past_covariates[columns].to_numpy(np.float32).T
+                                                          for r in batch])
 
         forecast = self.model.forecast(context, prediction_length=batch[0].model_horizon, **covariates)
         per_level = {level: _to_numpy(forecast.quantile(level))[:, 0, :] for level in QUANTILE_COLUMNS}

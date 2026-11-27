@@ -83,6 +83,14 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         record = records[model_key]
         if settings.target_source != "wind" or record.get("target") != "wind_MW":
             raise ValueError(f"{model_key} was trained on wind_MW; select the wind target")
+        trained_with = record.get("covariates") or []
+        if trained_with and sorted(trained_with) != sorted(settings.covariates):
+            raise ValueError(f"{model_key} was trained with the covariates {trained_with}; "
+                             f"select exactly these for the backtest (got {list(settings.covariates)})")
+        # The adapters are trained on the raw covariates: refuse principal components instead of feeding them
+        if trained_with and settings.pca_components is not None:
+            raise ValueError(f"{model_key} was trained on the raw covariates; turn the covariate PCA off "
+                             f"(pca_components=None) to evaluate it")
         run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / family / run_id
         artifact = run_dir / record.get("adapter_path", "finetuned-ckpt" if record.get("backend") == "peft" else "adapter.safetensors")
         files = [artifact] if artifact.is_file() else sorted(p for p in artifact.rglob("*") if p.is_file())
@@ -98,6 +106,8 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         tuned = load_lora_run(run_dir, device)
         forecaster = TSFM_ADAPTERS[family](device=device, model=tuned, name=f"{family} LoRA ({run_id})",
                                            pca_components=settings.pca_components)
+        if trained_with and family == "timestral_209m":
+            forecaster.covariate_order = list(trained_with)   # pick the request covariates by name, training order
         forecaster.load_seconds = time.perf_counter() - start
         forecaster.configuration = {"model_key": family, "run_id": run_id,
             "base_checkpoint": record["base_checkpoint"], "base_revision": record["base_revision"],

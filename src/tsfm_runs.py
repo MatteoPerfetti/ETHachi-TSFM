@@ -63,8 +63,9 @@ def training_records(root: Path | None = None) -> dict[str, dict]:
         model, run_id = path.parent.parent.name, path.parent.name
         if model not in ("chronos2", "timestral_209m"):
             continue
+        key = f"lora:{model}:{run_id}"
         try:
-            runs[f"lora:{model}:{run_id}"] = json.loads(path.read_text(encoding="utf-8"))
+            runs[key] = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
     return runs
@@ -75,6 +76,8 @@ def available_adapters(root: Path | None = None) -> dict[str, dict]:
     root = root or config.BACKTEST_RESULTS_DIR / "finetuning"
     runs = {}
     for key in training_records(root):
+        if not key.startswith("lora:"):
+            continue
         _, model, run_id = key.split(":", 2)
         run_dir = root / model / run_id
         try:
@@ -90,7 +93,9 @@ def available_adapters(root: Path | None = None) -> dict[str, dict]:
     return runs
 
 
-def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: str, adapter: str) -> dict:
+
+def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: str, adapter: str,
+                   covariates: list[str] | None = None) -> dict:
     run_dir.mkdir(parents=True, exist_ok=False)
     try:
         try:
@@ -112,7 +117,11 @@ def start_training(run_dir: Path, model: str, args, checkpoint: str, revision: s
                   "started_at": now(), "git_commit": commit, "git_dirty": dirty, "packages": packages,
                   "base_checkpoint": checkpoint, "base_revision": revision, "adapter_path": adapter,
                   "parameters": vars(args).copy(), "dataset": {"path": str(source),
-                  "sha256": fingerprint(source), "resolution": config.RESOLUTIONCODE}, "covariates": []}
+                  "sha256": fingerprint(source), "resolution": config.RESOLUTIONCODE},
+                  "covariates": list(covariates or [])}
+        if covariates:
+            weather = Path(config.OPENMETEO_SOURCES["dwd"]["path"])
+            record["dataset"]["weather"] = {"path": str(weather), "sha256": fingerprint(weather)}
         write_record(run_dir / "run.json", record)
         return record
     except BaseException:

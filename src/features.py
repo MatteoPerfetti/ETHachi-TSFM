@@ -65,19 +65,20 @@ def merge_dwd_weather(df: pd.DataFrame, dwd_path: str) -> pd.DataFrame:
     dwd_df["timestamp"] = pd.to_datetime(dwd_df["timestamp"], utc=True)
     dwd_df = dwd_df.set_index("timestamp").drop(columns="measured", errors="ignore")
     logger.info("Loaded DWD weather data from %s (%d rows)", dwd_path, len(dwd_df))
-    # Merge DWD data (PM15M) with Open-Meteo data (PT1H) on timestamp, keeping only rows where both have values
+    # Merge DWD data (PM15M) with Open-Meteo data (PT1H) on timestamp. Missing values stay explicit NaN (the Dataset
+    # contract): dropping every incomplete row would also delete complete DWD covariates wherever one Open-Meteo
+    # column is missing (e.g. the previous-day runs before mid-February 2024). Each model drops what it needs.
     merged = df.join(dwd_df, how="outer").sort_index()
-    complete = merged.dropna()
-    dropped = len(merged) - len(complete)
-    if dropped:
+    incomplete = int(merged.isna().any(axis=1).sum())
+    if incomplete:
         missing = merged.isna().sum()
         logger.warning(
-            "Dropped %d of %d rows with missing values after weather alignment. Missing per column: %s",
-            dropped,
+            "%d of %d rows have missing values after weather alignment (kept as NaN). Missing per column: %s",
+            incomplete,
             len(merged),
             missing[missing > 0].to_dict(),
         )
-    return complete
+    return merged
 
 # ------
 
