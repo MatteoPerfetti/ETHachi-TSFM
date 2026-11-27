@@ -196,16 +196,20 @@ def test_random_training_windows_cut_target_and_covariates_at_the_same_timestamp
             np.testing.assert_array_equal(future_cov[k].numpy(), np.arange(cut, cut + horizon) + k * OFFSET)
 
 
-@pytest.mark.parametrize("settings_covariates, error", [
-    ([], "trained with the covariates"),
-    (COVARIATES[:3], "trained with the covariates"),
-    (list(reversed(COVARIATES)), "Adapter files missing"),   # same set, any order: passes the covariate check
+@pytest.mark.parametrize("family, settings_covariates, pca, error", [
+    ("chronos2", [], None, "trained with the covariates"),
+    ("chronos2", COVARIATES[:3], None, "trained with the covariates"),
+    ("chronos2", list(reversed(COVARIATES)), None, "Adapter files missing"),   # Chronos reads by name: any order
+    ("timestral_209m", list(reversed(COVARIATES)), None, "by position"),       # Timestral reads by position
+    ("timestral_209m", COVARIATES, None, "Adapter files missing"),            # training order: passes the checks
+    ("chronos2", COVARIATES, 0.95, "turn the covariate PCA off"),             # raw-covariate adapter, PCA on
 ])
-def test_adapter_trained_with_covariates_needs_the_same_covariates(monkeypatch, tmp_path, settings_covariates, error):
+def test_adapter_trained_with_covariates_needs_the_same_covariates(monkeypatch, tmp_path, family, settings_covariates,
+                                                                   pca, error):
     record = {"target": "wind_MW", "covariates": COVARIATES, "backend": "peft",
-              "base_checkpoint": config.MODELS_REGISTRY["chronos2"]["checkpoint"], "base_revision": "r"}
-    monkeypatch.setattr("src.tsfm_runs.available_adapters", lambda: {"lora:chronos2:cov": record})
+              "base_checkpoint": config.MODELS_REGISTRY[family]["checkpoint"], "base_revision": "r"}
+    monkeypatch.setattr("src.tsfm_runs.available_adapters", lambda: {f"lora:{family}:cov": record})
     monkeypatch.setattr(config, "BACKTEST_RESULTS_DIR", tmp_path)
-    settings = backtest.BacktestSettings(covariates=settings_covariates, target_source="wind")
+    settings = backtest.BacktestSettings(covariates=settings_covariates, target_source="wind", pca_components=pca)
     with pytest.raises(ValueError, match=error):
-        backtest.load_forecaster("lora:chronos2:cov", settings)
+        backtest.load_forecaster(f"lora:{family}:cov", settings)

@@ -87,6 +87,14 @@ def load_forecaster(model_key: str, settings: BacktestSettings, base_revisions: 
         if trained_with and sorted(trained_with) != sorted(settings.covariates):
             raise ValueError(f"{model_key} was trained with the covariates {trained_with}; "
                              f"select exactly these for the backtest (got {list(settings.covariates)})")
+        # Timestral reads the covariates by position (a [batch, covariate, time] tensor), Chronos-2 by name
+        if trained_with and family == "timestral_209m" and list(trained_with) != list(settings.covariates):
+            raise ValueError(f"{model_key} reads its covariates by position; select them in the training order "
+                             f"{trained_with} (got {list(settings.covariates)})")
+        # The adapters are trained on the raw covariates: refuse principal components instead of feeding them
+        if trained_with and settings.pca_components is not None:
+            raise ValueError(f"{model_key} was trained on the raw covariates; turn the covariate PCA off "
+                             f"(pca_components=None) to evaluate it")
         run_dir = config.BACKTEST_RESULTS_DIR / "finetuning" / family / run_id
         artifact = run_dir / record.get("adapter_path", "finetuned-ckpt" if record.get("backend") == "peft" else "adapter.safetensors")
         files = [artifact] if artifact.is_file() else sorted(p for p in artifact.rglob("*") if p.is_file())
@@ -183,23 +191,9 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
         raise ValueError(f"covariates not in the dataset: {sorted(missing)}")
 
     ensemble_keys = [key for key in model_keys if key in config.ENSEMBLE_MODELS]
-    # δY output adapters (delta:<run-id>) post-process the forecasts of their base model, which runs as a dependency
-    delta_keys = [key for key in model_keys if key.startswith("delta:")]
-    delta_records = {}
-    if delta_keys:
-        from src.delta_adapter import check_settings
-        from src.tsfm_runs import available_delta_adapters
-
-        available = available_delta_adapters()
-        for key in delta_keys:
-            if key not in available:
-                raise ValueError(f"delta-Y adapter run is missing or unverified: {key}")
-            check_settings(available[key], settings)
-            delta_records[key] = available[key]
-    requested_base_keys = [key for key in model_keys if key not in config.ENSEMBLE_MODELS and key not in delta_keys]
+    requested_base_keys = [key for key in model_keys if key not in config.ENSEMBLE_MODELS]
     dependency_keys = config.ENSEMBLE_BASE_MODELS if ensemble_keys else []
-    delta_base_keys = [record["base_model_key"] for record in delta_records.values()]
-    run_keys = list(dict.fromkeys([*requested_base_keys, *dependency_keys, *delta_base_keys]))
+    run_keys = list(dict.fromkeys([*requested_base_keys, *dependency_keys]))
 
     from src.tsfm_runs import available_adapters
     adapter_records = available_adapters() if any(k.startswith("lora:") for k in run_keys) else {}
@@ -299,24 +293,6 @@ def run_backtest(dataset: Dataset, model_keys: list[str], settings: BacktestSett
         }
         logger.info("%s done: %d forecasts in %.2fs", ensemble_name,
                     ensemble.predictions["issue_time"].nunique(), elapsed)
-
-    for key, record in delta_records.items():
-        from src.delta_adapter import apply_to_predictions, load_adapter
-
-        run_id = key.split(":", 1)[1]
-        base_name = forecaster_by_key[record["base_model_key"]].name
-        start = time.perf_counter()
-        adapter, _ = load_adapter(config.BACKTEST_RESULTS_DIR / "finetuning" / "delta_y" / run_id)
-        name = f"{base_name} + delta-Y ({run_id})"
-        corrected = apply_to_predictions(adapter, base_predictions[base_predictions["model"] == base_name],
-                                         dataset.target, dataset.weather, settings.covariates,
-                                         record["context_steps"], name)
-        output_tables.append(corrected)
-        timings[name] = {"load_s": 0.0, "fit_s": 0.0, "predict_s": time.perf_counter() - start}
-        model_configs[name] = {"model_key": "delta_y", "run_id": run_id, "base_model_key": record["base_model_key"],
-                               "base_checkpoint": record.get("base_checkpoint"),
-                               "base_revision": record.get("base_revision"), "training": record}
-        logger.info("%s done: %d forecasts", name, corrected["issue_time"].nunique())
 
     predictions = pd.concat(output_tables, ignore_index=True)
     return BacktestResult(

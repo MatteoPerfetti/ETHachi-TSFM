@@ -22,7 +22,7 @@ from src.feature_selection import load_selection, run_tree_selection, save_selec
 from src.metrics import EVAL_WINDOWS, daily_scores, summary
 from src.plotter import plot_tree_importance, plotly_backtest_period, plotly_daily_scores, plotly_single_forecast
 from src.validate_config import validate_config
-from src.tsfm_runs import available_adapters, available_delta_adapters, training_records
+from src.tsfm_runs import available_adapters, training_records
 
 st.set_page_config(page_title="ETHachi-TSFM backtest", page_icon="⚡", layout="wide")
 # Charts use theme=None: our colors and legend layout (src/plotter.py) instead of Streamlit's chart theme
@@ -111,16 +111,11 @@ def new_backtest_form(expanded: bool) -> None:
         sources = list(config.ELIA_SOURCES)
         target = st.selectbox("Target source", sources, index=sources.index(config.TARGET_SOURCE))
         dataset = get_dataset(target)
-        adapters = {**available_adapters(), **available_delta_adapters()} if target == "wind" else {}
+        adapters = available_adapters() if target == "wind" else {}
         def model_label(key: str) -> str:
             if key not in adapters:
                 return config.MODELS_REGISTRY[key].get("name", {"chronos2": "Chronos-2 (zero-shot)", "timestral_209m": "Timestral-209M (zero-shot)", "timesfm3": "TimesFM-3 (zero-shot)"}.get(key, key))
             record = adapters[key]
-            if key.startswith("delta:"):
-                adapter = record.get("adapter_config", {})
-                return (f"{record.get('base_model_key', '?')} + δY — {key[6:]} ({adapter.get('arch', '?')}, "
-                        f"δ {adapter.get('delta', '?')}, context {record.get('context_steps', '?')}; "
-                        f"needs exactly its covariates)")
             _, family, run_id = key.split(":", 2)
             covariates = len(record.get("covariates") or [])
             return (f"{family} LoRA — {run_id} (context {record.get('context_steps', '?')}, "
@@ -217,8 +212,7 @@ def collect_results(runs: dict[str, dict]) -> tuple[list[dict], set[str]]:
         for model, score in scores.items():
             cfg = meta.get("model_configs", {}).get(model, {})
             if cfg.get("run_id"):
-                evaluated.add(f"delta:{cfg['run_id']}" if cfg.get("model_key") == "delta_y"
-                              else f"lora:{cfg.get('model_key')}:{cfg['run_id']}")
+                evaluated.add(f"lora:{cfg.get('model_key')}:{cfg['run_id']}")
             rows.append({"Evaluation": name, "Model": model, "Training run": cfg.get("run_id"),
                          "Target": meta.get("target", settings.get("target_source", "unknown")),
                          "Start UTC": settings.get("test_start"), "End UTC (exclusive)": settings.get("test_end"),
@@ -273,7 +267,7 @@ def experiment_history(evaluated: set[str]) -> None:
     """List evaluation attempts and the training settings recorded for each adapter."""
     with st.expander("Training and evaluation history", expanded=False):
         adapters = training_records()
-        selectable = {**available_adapters(), **available_delta_adapters()}
+        selectable = available_adapters()
         attempts = []
         for path in (config.BACKTEST_RESULTS_DIR / "backtest_attempts").glob("*.json"):
             try:
@@ -289,7 +283,7 @@ def experiment_history(evaluated: set[str]) -> None:
                          alt="Failed and interrupted backtest attempts")
         training_rows = []
         for key, record in adapters.items():
-            family, run_id = ("delta_y", key[6:]) if key.startswith("delta:") else key.split(":", 2)[1:]
+            _, family, run_id = key.split(":", 2)
             training_rows.append({"Model": family, "Run": run_id, "Training context": record.get("context_steps"),
                                   "Horizon": record.get("horizon_steps"), "Steps": record.get("steps"),
                                   "Batch size": record.get("batch_size"), "Rank": record.get("rank"),
@@ -301,8 +295,7 @@ def experiment_history(evaluated: set[str]) -> None:
             st.caption("Training runs without a recorded shared backtest can be selected in the sidebar.")
             st.dataframe(pd.DataFrame(training_rows), hide_index=True, width="stretch",
                          alt="Training parameters and rolling backtest status")
-            selected = st.selectbox("Training run details", list(adapters),
-                                    format_func=lambda k: k.replace("lora:", "").replace("delta:", "delta_y:"))
+            selected = st.selectbox("Training run details", list(adapters), format_func=lambda k: k.replace("lora:", ""))
             st.json(adapters[selected])
 
 
@@ -379,7 +372,7 @@ def single_tab(predictions: pd.DataFrame, models: list[str], window: str, bands:
 
 def training_form() -> None:
     """Start the existing standalone PEFT trainers without blocking the dashboard."""
-    st.caption("Train a new LoRA adapter on wind. Chronos-2 can also train with the weather covariates of config.py; "
+    st.caption("Train a new LoRA adapter on wind, optionally with the weather covariates of config.py; "
                "an adapter trained with covariates must be evaluated with exactly those covariates.")
     with st.form("training_form"):
         family = st.selectbox("Model to fine-tune", ["chronos2", "timestral_209m"], format_func=lambda x: {"chronos2": "Chronos-2", "timestral_209m": "Timestral-209M"}[x])
@@ -391,7 +384,7 @@ def training_form() -> None:
         learning_rate = st.number_input("Learning rate", min_value=0.00000001, max_value=1.0, value=0.00001, format="%.8f")
         seed = st.number_input("Random seed", min_value=0, max_value=2147483647, value=42)
         device = st.selectbox("Training device", ["auto", "cpu", "cuda"])
-        with_covariates = st.checkbox("Train with weather covariates (Chronos-2 only)",
+        with_covariates = st.checkbox("Train with weather covariates",
                                       help=f"Uses {config.TSFM_COVARIATES['wind']}. Batch size counts windows.")
         submitted = st.form_submit_button("Start training")
     if submitted:
@@ -409,9 +402,6 @@ def training_form() -> None:
         cmd = [sys.executable, "-u", "-m", module, "--run-id", run_id, "--context-days", str(context), "--steps", str(steps), "--batch-size", str(batch_size), "--rank", str(rank), "--learning-rate", str(learning_rate), "--seed", str(seed), "--device", device]
         if family == "chronos2": cmd.extend(["--backend", "peft"])
         if with_covariates:
-            if family != "chronos2":
-                st.error("Training with covariates is implemented for Chronos-2 only.")
-                return
             cmd.extend(["--covariates", "config"])
         try:
             with log_path.open("x", encoding="utf-8") as log:

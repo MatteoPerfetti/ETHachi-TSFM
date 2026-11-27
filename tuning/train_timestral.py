@@ -212,8 +212,8 @@ def _train(args: argparse.Namespace, run_dir: Path, run_record: dict) -> Path:
     if weeks:
         day = pd.Timedelta(days=1)
         next_day = int((day - pd.Timedelta(f"{config.BACKTEST_ISSUE_TIME}:00")) / STEP)
-        if horizon <= next_day:
-            raise ValueError("Forecast horizon does not reach D+1")
+        if horizon < next_day + int(day / STEP):
+            raise ValueError("Forecast horizon does not cover the whole of D+1")
         d1 = slice(next_day, next_day + int(day / STEP))
     selection_metric = "RMSE_D1" if weeks else "loss"
     validation_interval = args.validation_interval or (100 if weeks else 50)
