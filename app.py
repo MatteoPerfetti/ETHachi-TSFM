@@ -152,6 +152,9 @@ def new_backtest_form(expanded: bool) -> None:
                                         default=[c for c in default if c in dataset.weather.columns],
                                         key=f"covariates_{target}")
             st.caption("Selected weather is supplied at forecast time to models that support it. Clear the selection for wind-only forecasts. Historical future weather is an oracle, not an archived forecast.")
+            use_pca = st.checkbox("Condense the weather inputs with PCA", value=config.PCA_N_COMPONENTS is not None,
+                                  help=f"config.PCA_N_COMPONENTS = {config.PCA_N_COMPONENTS}. LoRA adapters trained "
+                                       "on the raw weather inputs need it off.")
             submitted = st.form_submit_button("Run comparison", type="primary")
         st.caption("Each backtest is saved separately. Training does not start a backtest automatically. "
                    "Use validation dates to compare settings; reserve the 2025 holdout for the final comparison.")
@@ -162,11 +165,15 @@ def new_backtest_form(expanded: bool) -> None:
         if start_date > end_date:
             st.sidebar.error("The first issue date must not be after the last issue date.")
             return
+        if use_pca and any(adapters.get(m, {}).get("covariates") for m in models):
+            st.sidebar.error("The selected LoRA adapters were trained on the raw weather inputs: turn PCA off.")
+            return
         settings = BacktestSettings(test_start=pd.Timestamp(start_date, tz="UTC").isoformat(),
                                     test_end=(pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1)).isoformat(),
                                     context_steps=int(context), horizon_steps=int(horizon),
                                     latency_steps=int(latency), covariates=covariates,
-                                    traditional_strategy=traditional_strategy, target_source=target)
+                                    traditional_strategy=traditional_strategy, target_source=target,
+                                    pca_components=config.PCA_N_COMPONENTS if use_pca else None)
         with st.spinner(f"Running backtest {settings.run_name} for {', '.join(models)}..."):
             path = run_recorded_backtest(dataset, models, settings)
         st.session_state["run"] = path.stem

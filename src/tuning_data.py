@@ -1,9 +1,10 @@
 """Training and validation windows for the standalone foundation-model trainers.
 
 `load_windows` gives wind-only tensors (Chronos-2 custom/PEFT and Timestral). `load_covariate_inputs` gives the same
-period as Chronos-2 input dicts with the weather covariates, for `Chronos2Pipeline.fit`.
+period as Chronos-2 input dicts with the weather covariates: `Chronos2Pipeline.fit` takes them directly, and the
+Timestral trainer cuts its windows from them.
 
-Two validation schemes for the covariate inputs:
+Three validation schemes for the covariate inputs:
 - "december": the 09:00 forecasts of December 2024, with the training context; training stops on 1 December.
 - "weeks": the 09:00 forecasts of days 1-7 of every month of 2024 whose history allows the validation context
   (January has none: the data starts on 28 December 2023). Training covers all of 2024, with the target set to
@@ -98,7 +99,7 @@ def build_covariate_inputs(target: pd.Series, weather: pd.DataFrame, context: in
     issue_offset = pd.Timedelta(f"{config.BACKTEST_ISSUE_TIME}:00")
     train_end = pd.Timestamp(config.TRAIN_END)
     for origin in pd.date_range(VALIDATION_START + issue_offset, train_end, freq="D", inclusive="left"):
-        if origin + (horizon - 1) * STEP >= train_end:
+        if origin + (horizon - 1) * STEP > train_end:
             break
         window = frame.reindex(pd.date_range(origin - context * STEP, periods=context + horizon, freq=STEP))
         if np.isfinite(window.to_numpy(dtype=np.float64)).all():

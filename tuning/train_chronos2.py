@@ -343,7 +343,8 @@ def _train(args: argparse.Namespace, run_dir: Path, record: dict) -> Path:
                 "covariates": covariates, "context_days": args.context_days,
                 "target_modules": list(TARGET_MODULES), "issue_time_utc": config.BACKTEST_ISSUE_TIME,
                 "latency_steps": 0, "optimizer": "AdamW", "weight_decay": 0.0,
-                "validation_interval_steps": (min(WEEKS_VALIDATION_INTERVAL, args.steps) if weeks
+                "validation_interval_steps": (min(getattr(args, "validation_interval", None)
+                                                  or WEEKS_VALIDATION_INTERVAL, args.steps) if weeks
                                               else min(50, args.steps) if args.backend == "peft" else 50)}
     if weeks:
         best, history, fit_batch_size = train_with_validation_context(

@@ -16,11 +16,7 @@ TSFM_BATCH_SIZE = 64  # requests per model call; lower it if the device runs out
 
 
 def default_device() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    if hasattr(torch, "xpu") and torch.xpu.is_available():  # Intel Arc GPUs (PyTorch XPU build)
-        return "xpu"
-    return "cpu"
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _to_numpy(values: Any) -> np.ndarray:
